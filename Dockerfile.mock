@@ -1,0 +1,22 @@
+FROM ubuntu:22.04
+
+# Instala Python e ferramentas de rede
+RUN apt-get update && apt-get install -y \
+    python3 \
+    curl \
+    iputils-ping \
+    net-tools \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /app/config /app/db
+
+# --- AQUI ESTÁ A CORREÇÃO ---
+# Copia o arquivo local mock_server.py para dentro da imagem
+COPY mock_server.py /usr/local/bin/iota_mock.py
+
+# Garante permissão de execução (opcional, mas bom)
+RUN chmod +x /usr/local/bin/iota_mock.py
+
+# Comando padrão
+CMD ["python3", "/usr/local/bin/iota_mock.py"]

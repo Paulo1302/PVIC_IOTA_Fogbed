@@ -1,0 +1,2 @@
+[console_scripts]
+RunWorker = clusternet.server.worker_app:main
