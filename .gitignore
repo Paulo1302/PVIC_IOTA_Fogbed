@@ -18,4 +18,7 @@ iota_fogbed_workdir/
 .vscode/
 .idea/
 
-containernet/
+containernet/__pycache__/
+fog-env/
+env/
+final-env/
