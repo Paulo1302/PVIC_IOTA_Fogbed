@@ -1,0 +1,21 @@
+# Ambientes Virtuais Python
+fog-env/
+final-env/
+venv/
+__pycache__/
+*.pyc
+
+# Dados gerados durante a execução (Checkpoints, Logs, Genesis)
+iota_data/
+genesis_temp/
+live_data/
+iota_fogbed_workdir/
+
+# Logs soltos
+*.log
+
+# Configurações de IDE
+.vscode/
+.idea/
+
+containernet/

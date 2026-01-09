@@ -41,15 +41,15 @@ class IotaNodeDriver:
 
     def get_latest_checkpoint(self):
         """Consulta o último checkpoint (bloco) validado."""
-        res = self._call_rpc("sui_getLatestCheckpointSequenceNumber")
+        res = self._call_rpc("iota_getLatestCheckpointSequenceNumber")
         return res.get("result", "N/A")
 
     def get_total_transactions(self):
         """Consulta o total de transações processadas."""
-        res = self._call_rpc("sui_getTotalTransactionBlocks")
+        res = self._call_rpc("iota_getTotalTransactionBlocks")
         return res.get("result", 0)
 
     def get_peers(self):
         """Consulta a lista de peers conectados."""
-        res = self._call_rpc("sui_getPeers")
+        res = self._call_rpc("iota_getPeers")
         return res.get("result", [])
