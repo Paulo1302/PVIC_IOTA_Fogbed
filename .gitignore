@@ -1,24 +1,24 @@
-# Ambientes Virtuais Python
-fog-env/
-final-env/
-venv/
-__pycache__/
-*.pyc
+# Ignorar Binários Pesados (Eles devem ir para Docker Hub ou Releases)
+iota
+iota-node
+target/
 
-# Dados gerados durante a execução (Checkpoints, Logs, Genesis)
+# Ignorar Ambientes Virtuais Python
+fog-env/
+venv/
+.env
+
+# Ignorar Pastas de Dados Gerados pelo Experimento
 iota_data/
 genesis_temp/
 live_data/
-iota_fogbed_workdir/
+tmp/
 
-# Logs soltos
-*.log
+# Ignorar Cache do Python
+__pycache__/
+*.pyc
 
-# Configurações de IDE
+# Ignorar Arquivos de Sistema/IDE
+.DS_Store
 .vscode/
 .idea/
-
-containernet/__pycache__/
-fog-env/
-env/
-final-env/
