@@ -1,24 +1,9 @@
-# Ignorar Binários Pesados (Eles devem ir para Docker Hub ou Releases)
-iota
-iota-node
-target/
-
-# Ignorar Ambientes Virtuais Python
-fog-env/
-venv/
-.env
-
-# Ignorar Pastas de Dados Gerados pelo Experimento
 iota_data/
-genesis_temp/
-live_data/
-tmp/
-
-# Ignorar Cache do Python
 __pycache__/
 *.pyc
-
-# Ignorar Arquivos de Sistema/IDE
-.DS_Store
+.egg-info/
+dist/
+build/
 .vscode/
-.idea/
+.env
+venv/
