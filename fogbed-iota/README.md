@@ -1,6 +1,3 @@
-Perfeito! Vou criar um README.md completo e atualizado com todas as funcionalidades implementadas:
-
-```markdown
 # fogbed-iota
 
 🚀 **IOTA blockchain integration for Fogbed network emulator**
