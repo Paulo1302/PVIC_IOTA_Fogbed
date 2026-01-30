@@ -82,3 +82,5 @@ ENV RUST_LOG=info,iota=debug
 # Entrypoint flexível para Fogbed
 ENTRYPOINT []
 CMD ["tail", "-f", "/dev/null"]
+
+
