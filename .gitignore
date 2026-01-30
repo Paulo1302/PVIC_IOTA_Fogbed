@@ -1,4 +1,8 @@
-# Python
+# ==================== IOTA Data ====================
+iota_data/
+iota_data/*
+
+# ==================== Python ====================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,33 +24,35 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
-venv/
-env/
-ENV/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Testing
+# ==================== Testing ====================
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 
-# Docker
-*.tar.gz
-
-# OS
+# ==================== IDE ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
 
-# Project specific
+# ==================== Virtual Environment ====================
+.venv/
+venv/
+ENV/
+env/
+
+# ==================== Docker ====================
+.dockerignore
+
+# ==================== Git ====================
+.git/
+.gitignore
+
+# ==================== Misc ====================
+.env
+.env.local
 *.log
-/tmp/
-/data/
-fogbed-iota/          
+node_modules/
