@@ -1,41 +1,25 @@
-# fogbed_iota/client/exceptions.py
-
-"""
-Exceções customizadas para cliente IOTA
-"""
-
+"""Exceções específicas do cliente IOTA"""
 
 class IotaClientError(Exception):
-    """Erro base para cliente IOTA"""
-
+    """Erro genérico do cliente IOTA"""
     pass
 
-
 class IotaRpcError(IotaClientError):
-    """Erro em chamada JSON-RPC"""
-
-    def __init__(self, code: int, message: str, data=None):
+    """Erro retornado pelo servidor IOTA via JSON-RPC"""
+    def __init__(self, code: int, message: str, data: dict = None):
         self.code = code
         self.message = message
         self.data = data
         super().__init__(f"RPC Error {code}: {message}")
 
-
-class IotaGraphQLError(IotaClientError):
-    """Erro em query GraphQL"""
-
-    def __init__(self, errors: list):
-        self.errors = errors
-        super().__init__(f"GraphQL errors: {errors}")
-
-
 class IotaConnectionError(IotaClientError):
-    """Erro de conexão com nó"""
-
+    """Erro de conexão com o nó IOTA"""
     pass
 
-
 class IotaTimeoutError(IotaClientError):
-    """Timeout em requisição"""
+    """Timeout na comunicação com o nó"""
+    pass
 
+class IotaGraphQLError(IotaClientError):
+    """Erro GraphQL do nó IOTA"""
     pass

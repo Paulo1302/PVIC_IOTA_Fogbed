@@ -1,19 +1,14 @@
-# fogbed_iota/client/__init__.py
+"""Cliente IOTA para fogbed-iota"""
+__version__ = "1.1.0"
 
-"""
-Cliente para interação com nós IOTA
-
-Fornece abstrações para JSON-RPC e GraphQL
-"""
-
-from fogbed_iota.client.rpc_client import IotaRpcClient, AsyncIotaRpcClient
-from fogbed_iota.client.graphql_client import IotaGraphQLClient
-from fogbed_iota.client.exceptions import (
+from .rpc_client import IotaRpcClient, AsyncIotaRpcClient
+from .graphql_client import IotaGraphQLClient
+from .exceptions import (
     IotaClientError,
-    IotaRpcError,
-    IotaGraphQLError,
-    IotaConnectionError,
+    IotaRpcError, 
+    IotaConnectionError, 
     IotaTimeoutError,
+    IotaGraphQLError
 )
 
 __all__ = [
@@ -22,7 +17,7 @@ __all__ = [
     "IotaGraphQLClient",
     "IotaClientError",
     "IotaRpcError",
-    "IotaGraphQLError",
     "IotaConnectionError",
     "IotaTimeoutError",
+    "IotaGraphQLError"
 ]

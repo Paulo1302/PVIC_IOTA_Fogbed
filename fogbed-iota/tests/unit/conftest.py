@@ -131,3 +131,27 @@ def mock_graphql_response():
     def _mock_graphql(data: Dict[str, Any]) -> Dict[str, Any]:
         return {"data": data}
     return _mock_graphql
+
+@pytest.fixture
+def mock_object_response():
+    return {
+        "data": {
+            "objectId": "0xABC123",
+            "type": "0x2::coin::Coin<0x2::iota::IOTA>",
+            "balance": "1000000",
+            "version": "1",
+            "digest": "OBJ_DIGEST"
+        },
+        "status": "exists"
+    }
+
+@pytest.fixture
+def mock_owned_objects_response():
+    return {
+        "data": [
+            {"objectId": "0xCOIN1", "type": "0x2::iota::IOTA"},
+            {"objectId": "0xCOIN2", "type": "0x2::iota::IOTA"}
+        ],
+        "hasNextPage": False,
+        "nextCursor": None
+    }
