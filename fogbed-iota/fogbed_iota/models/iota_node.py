@@ -32,7 +32,6 @@ class NodeRole(Enum):
 
 
 class NodeType(Enum):
-    class NodeType(Enum):
     """
     Subtipos operacionais para infraestrutura (não oficiais da IOTA).
     

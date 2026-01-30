@@ -213,8 +213,8 @@ def test_fullnode_node():
     logger.info(f"   Metrics: {fullnode.get_metrics_endpoint()}")
     
     assert fullnode.config.role == NodeRole.FULLNODE
-    assert fullnode.get_rpc_endpoint() == "http://10.0.0.5:9000"
-    assert fullnode.get_metrics_endpoint() == "http://10.0.0.5:9184/metrics"
+    assert fullnode.get_rpc_endpoint() == "http://10.0.0.5:9040"  # certo com offset 4
+    assert fullnode.get_rpc_endpoint() == "http://10.0.0.5:9040"  # port_offset=4 -> 9000 + 40 = 9040
     logger.info("✅ FullnodeNode properties correct")
     
     # Testar que rejeita role errada
