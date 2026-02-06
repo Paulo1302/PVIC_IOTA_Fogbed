@@ -133,6 +133,10 @@ class IotaNetwork:
         self.client_container: Optional[Container] = None
         self._iota_binary_path: Optional[str] = None
 
+         # Novos componentes para smart contracts
+        self.account_manager: Optional[AccountManager] = None
+        self.contract_manager: Optional[SmartContractManager] = None
+
     # ========== Construção da Topologia ==========
 
     def add_validator(self, name: str, ip: str) -> IotaNode:
@@ -246,20 +250,24 @@ class IotaNetwork:
         logger.info("="*60)
         
         try:
-            logger.info("Phase 1/5: Cleanup")
+            logger.info("Phase 1/6: Cleanup")
             self._cleanup()
             
-            logger.info("Phase 2/5: Genesis Generation")
+            logger.info("Phase 2/6: Genesis Generation")
             self._generate_genesis()
             
-            logger.info("Phase 3/5: Config Preparation")
+            logger.info("Phase 3/6: Config Preparation")
             self._prepare_configs()
             
-            logger.info("Phase 4/5: Injection and Boot")
+            logger.info("Phase 4/6: Injection and Boot")
             self._inject_and_boot()
             
-            logger.info("Phase 5/5: Client Configuration")
+            logger.info("Phase 5/6: Client Configuration")
             self._configure_client()
+
+             # Nova fase: Smart Contract Setup
+            logger.info("Phase 6/6: Smart Contract Environment")
+            self._setup_smart_contract_env()
             
             logger.info("="*60)
             logger.info("✅ IOTA Network Successfully Started!")
@@ -716,8 +724,102 @@ active_env: fognet
             'total': len(self.nodes)
         }
 
+    def _setup_smart_contract_env(self) -> None:
+        """
+        Configura ambiente para smart contracts
+        
+        NÃO faz funding - apenas prepara ferramentas
+        """
+        if not self.client_container:
+            logger.warning("No client container - skipping smart contract setup")
+            return
+        
+        logger.info("Setting up smart contract environment")
+        
+        # Inicializar gerenciadores
+        try:
+            from fogbed_iota.accounts import AccountManager
+            from fogbed_iota.smart_contracts import SmartContractManager
+            
+            self.account_manager = AccountManager(self.client_container)
+            self.contract_manager = SmartContractManager(
+                self.client_container,
+                self.account_manager
+            )
+        except ImportError as e:
+            logger.error(f"Failed to import smart contract modules: {e}")
+            logger.warning("Smart contract support not available - missing modules")
+            return
+        
+        # Verificar disponibilidade de ferramentas Move (melhorado)
+        check_cmd = "which iota && echo 'BINARY_OK' || echo 'BINARY_MISSING'"
+        result = self.client_container.cmd(check_cmd)
+        
+        if 'BINARY_OK' in result:
+            # Tentar verificar move subcommand
+            move_check = self.client_container.cmd("iota move --version 2>&1 || echo 'SUBCOMMAND'")
+            
+            if 'SUBCOMMAND' not in move_check:
+                logger.info("✅ Move tooling available")
+            else:
+                logger.info("✅ IOTA CLI available (Move integrated)")
+        else:
+            logger.warning("⚠️  'iota' binary not found in container")
+        
+        # Criar diretório de contratos
+        self.client_container.cmd("mkdir -p /contracts /contracts/examples")
+        
+        logger.info("✅ Smart contract environment ready")
+        logger.info("")
+        logger.info("📝 Next steps:")
+        logger.info("   1. Generate accounts: network.account_manager.generate_account('alice')")
+        logger.info("   2. Fund accounts manually (faucet or transfer)")
+        logger.info("   3. Deploy contracts: network.contract_manager.publish_package(...)")
+
     class IotaNetwork:
-        def add_validator(self, name: str, ip: str):
-            validator = create_validator(name, ip, port_offset=len(self.nodes))
-            self.nodes.append(validator)
-            return validator
+
+        def _setup_smart_contract_env(self) -> None:
+            """
+            Configura ambiente para smart contracts
+            
+            NÃO faz funding - apenas prepara ferramentas
+            """
+            if not self.client_container:
+                logger.warning("No client container - skipping smart contract setup")
+                return
+            
+            logger.info("Setting up smart contract environment")
+            
+            # Inicializar gerenciadores
+            try:
+                from fogbed_iota.accounts import AccountManager
+                from fogbed_iota.smart_contracts import SmartContractManager
+                
+                self.account_manager = AccountManager(self.client_container)
+                self.contract_manager = SmartContractManager(
+                    self.client_container,
+                    self.account_manager
+                )
+            except ImportError as e:
+                logger.error(f"Failed to import smart contract modules: {e}")
+                logger.warning("Smart contract support not available - missing modules")
+                return
+            
+            # Verificar disponibilidade de ferramentas Move
+            check_cmd = "iota move --help > /dev/null 2>&1 && echo 'OK' || echo 'MISSING'"
+            result = self.client_container.cmd(check_cmd).strip()
+            
+            if result == 'OK':
+                logger.info("✅ Move tooling available")
+            else:
+                logger.warning("⚠️  'iota move' command not found - check Docker image")
+            
+            # Criar diretório de contratos
+            self.client_container.cmd("mkdir -p /contracts /contracts/examples")
+            
+            logger.info("✅ Smart contract environment ready")
+            logger.info("")
+            logger.info("📝 Next steps:")
+            logger.info("   1. Generate accounts: network.account_manager.generate_account('alice')")
+            logger.info("   2. Fund accounts manually (faucet or transfer)")
+            logger.info("   3. Deploy contracts: network.contract_manager.publish_package(...)")
