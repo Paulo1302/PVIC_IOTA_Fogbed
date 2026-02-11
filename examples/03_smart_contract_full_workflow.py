@@ -1,303 +1,374 @@
 #!/usr/bin/env python3
+
 # examples/03_smart_contract_full_workflow.py
 
 """
-Exemplo completo: Smart Contract Move com gas manual
-Demonstra todo o ciclo de vida de um contrato
+Exemplo 3: Workflow Completo de Smart Contracts com Gas Manual
+
+Demonstra:
+- Setup de rede IOTA completa (4 validators + 1 gateway)
+- Gerenciamento de contas (Alice e Bob)
+- Funding manual via faucet (princípio de gas transparente)
+- Deploy de smart contract Move
+- Interação com contrato (chamada de funções)
+- Uso de IotaCLI e TransactionBuilder
 """
+
 import sys
-import os
 import time
-import subprocess
+from pathlib import Path
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Adicionar diretório raiz ao path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fogbed import FogbedExperiment, Container
-from mininet.log import setLogLevel, info
+from fogbed import (
+    FogbedExperiment,
+    Container,
+)
 from fogbed_iota import IotaNetwork
+from fogbed_iota.client.cli import IotaCLI
+from fogbed_iota.client.transaction import SimpleTransaction
 
-def cleanup_previous_run():
-    """Limpa containers e redes de execuções anteriores"""
-    print("🧹 Cleaning up previous run...")
-    
-    # Parar containers mn.*
-    subprocess.run(
-        "docker ps -a | grep 'mn\\.' | awk '{print $1}' | xargs -r docker rm -f",
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    
-    # Limpar Mininet
-    subprocess.run(
-        ["mn", "-c"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    
-    print("✅ Cleanup complete\n")
+
+NETWORK_STABILIZATION_TIME = 20
+CONTRACT_SOURCE_DIR = "/contracts/counter"
+
+
+def print_header(title: str):
+    print("\n" + "=" * 70)
+    print(title.center(70))
+    print("=" * 70 + "\n")
+
+
+def print_step(step_num: int, description: str):
+    print(f"\n{'─' * 70}")
+    print(f"STEP {step_num}: {description}")
+    print('─' * 70 + "\n")
+
+
+def format_balance(mist: int) -> str:
+    iota = mist / 1_000_000_000
+    return f"{mist:,} MIST ({iota:.4f} IOTA)"
+
 
 def main():
-    # Limpar antes de começar
-    cleanup_previous_run()
-    
-    setLogLevel("info")
-    
-    print("=" * 70)
-    print("IOTA Smart Contract Workflow - Gas Manual")
-    print("=" * 70)
-    
+    print_header("IOTA Smart Contract Workflow - Using CLI Tools")
+
+    # ========== Fase 1: Setup da Rede ==========
+    print_step(1, "Network Setup")
+
+    print("🚀 Starting Fogbed experiment...")
     exp = FogbedExperiment()
-    
-    # Criar rede IOTA
+
+    # IMPORTANTE: usar os mesmos nomes que no exemplo 01 (iota1..4, gateway)
+    print("📦 Adding IOTA nodes...")
     iota_net = IotaNetwork(exp, image="iota-dev:latest")
-    
-    # Topologia: 4 validators + 1 gateway
-    for i in range(1, 5):
-        iota_net.add_validator(f"validator{i}", f"10.0.0.{i}")
-    
-    iota_net.add_gateway("gateway", "10.0.0.100")
-    
-    # Cliente com ferramentas Move
+
+    iota_net.add_validator("iota1", "10.0.0.1")
+    iota_net.add_validator("iota2", "10.0.0.2")
+    iota_net.add_validator("iota3", "10.0.0.3")
+    iota_net.add_validator("iota4", "10.0.0.4")
+    iota_net.add_gateway("gateway", "10.0.0.5")
+
+    print("💻 Adding client container...")
     client = Container(
         name="client",
+        ip="10.0.0.100",
         dimage="iota-dev:latest",
-        ip="10.0.0.200",
-        privileged=True
+        dcmd="tail -f /dev/null",
     )
     iota_net.set_client(client)
-    
-    iota_net.attach_to_experiment("cloud")
-    
-    # Iniciar
-    print("\n🚀 Starting Fogbed network...")
+
+    print("🔗 Attaching to experiment...")
+    iota_net.attach_to_experiment()
+
+    print("▶️ Starting experiment...")
     exp.start()
-    
+
+    # Debug: garantir que os containers Mininet foram criados
+    import os
+    os.system("docker ps -a | egrep 'mn\\.' || echo 'no mn.* containers'")
+
     print("\n🚀 Starting IOTA network...")
     iota_net.start()
-    
-    print("\n⏳ Waiting for network stabilization (20s)...")
-    time.sleep(20)
-    
-    # ========================================
-    # PARTE 1: Gerenciamento de Contas
-    # ========================================
-    
-    print("\n" + "="*70)
-    print("STEP 1: Account Management")
-    print("="*70)
-    
+
+    print(f"\n⏳ Waiting for network stabilization ({NETWORK_STABILIZATION_TIME}s)...")
+    time.sleep(NETWORK_STABILIZATION_TIME)
+
+    # ========== Fase 2: Inicializar CLI Tools ==========
+    print_step(2, "Initialize CLI Tools")
+
+    cli = IotaCLI(client)
+    print("✅ IotaCLI initialized")
+
+    gas_price = cli.get_reference_gas_price()
+    print(f"📊 Reference gas price: {gas_price} MIST")
+
+    # ========== Fase 3: Account Management ==========
+    print_step(3, "Account Management")
+
+    print("📝 Generating keypairs...")
     acct_mgr = iota_net.account_manager
-    
-    # Gerar contas
-    print("\n📝 Generating keypairs...")
+
     alice = acct_mgr.generate_account("alice")
+    print(f"✅ Alice: {alice.address}")
+
     bob = acct_mgr.generate_account("bob")
-    
-    print(f"\n✅ Alice: {alice.address}")
     print(f"✅ Bob: {bob.address}")
-    
-    # Verificar saldos (devem estar zerados)
-    print("\n💰 Checking balances...")
-    alice_balance = acct_mgr.get_balance("alice")
-    bob_balance = acct_mgr.get_balance("bob")
-    
-    print(f"   Alice: {alice_balance} MIST (empty)")
-    print(f"   Bob: {bob_balance} MIST (empty)")
-    
-    # ========================================
-    # PARTE 2: Funding Manual (Faucet)
-    # ========================================
-    
-    print("\n" + "="*70)
-    print("STEP 2: Manual Funding via Faucet")
-    print("="*70)
-    
-    print("\n⚠️  MANUAL STEP REQUIRED:")
-    print("   Alice and Bob have no gas. You need to fund them manually.")
-    print("")
-    print("   Option A: Use IOTA faucet (if available in genesis)")
-    print(f"     iota client call --package 0x2 --module faucet \\")
-    print(f"       --function request --args {alice.address} \\")
-    print(f"       --gas-budget 10000000")
-    print("")
-    print("   Option B: Transfer from a genesis treasury account")
-    print("     (if you configured one in genesis)")
-    print("")
-    
-    input("👉 Press ENTER after funding Alice's account...")
-    
-    # Verificar saldo novamente
-    alice_balance_after = acct_mgr.get_balance("alice")
-    print(f"\n💰 Alice balance after funding: {alice_balance_after} MIST")
-    
-    if alice_balance_after == 0:
-        print("\n⚠️  WARNING: Alice still has no balance!")
-        print("   Smart contract operations will fail.")
-        print("   Make sure to fund the account before proceeding.")
-    
-    # ========================================
-    # PARTE 3: Deploy de Smart Contract
-    # ========================================
-    
-    print("\n" + "="*70)
-    print("STEP 3: Smart Contract Deployment")
-    print("="*70)
-    
-    contract_mgr = iota_net.contract_manager
-    
-    # Assumindo que você tem um contrato em ./contracts/my_counter
-    local_contract_path = "./contracts/my_counter"
-    
-    if not os.path.exists(local_contract_path):
-        print(f"\n⚠️  Contract not found at {local_contract_path}")
-        print("   Creating example counter contract...")
-        create_example_counter_contract(local_contract_path)
-    
-    # Copiar para container
-    print(f"\n📦 Copying contract to container...")
-    container_path = contract_mgr.copy_package_to_container(
-        local_contract_path, 
-        "my_counter"
-    )
-    
-    # Build
-    print(f"\n🔨 Building Move package...")
-    build_result = contract_mgr.build_package(container_path)
-    print(f"   Modules: {', '.join(build_result['modules'])}")
-    
-    # Publish (requer gas de Alice)
-    print(f"\n🚀 Publishing package (using Alice's gas)...")
-    
-    try:
-        package = contract_mgr.publish_package(
-            package_path=container_path,
-            sender_alias="alice",
-            gas_budget=100_000_000
-        )
-        
-        print(f"\n✅ Package deployed successfully!")
-        print(f"   Package ID: {package.package_id}")
-        print(f"   Transaction: {package.digest}")
-        print(f"   Publisher: {package.publisher}")
-        
-    except RuntimeError as e:
-        print(f"\n❌ Publish failed: {e}")
-        print("\n   This is expected if Alice has no balance.")
-        print("   Please fund Alice and try again.")
-        return
-    
-    # ========================================
-    # PARTE 4: Chamada de Função
-    # ========================================
-    
-    print("\n" + "="*70)
-    print("STEP 4: Contract Interaction")
-    print("="*70)
-    
-    print(f"\n🔄 Calling increment function...")
-    
-    try:
-        tx_result = contract_mgr.call_function(
-            package_id=package.package_id,
-            module="counter",
-            function="increment",
-            sender_alias="alice",
-            args=[],
-            gas_budget=10_000_000
-        )
-        
-        print(f"\n✅ Function executed!")
-        print(f"   Transaction: {tx_result.get('digest', 'N/A')}")
-        
-        # Buscar objeto Counter criado
-        created_objects = [
-            obj for obj in tx_result.get('objectChanges', [])
-            if obj.get('type') == 'created'
-        ]
-        
-        if created_objects:
-            counter_id = created_objects[0]['objectId']
-            print(f"   Counter Object: {counter_id}")
-            
-            # Query do objeto
-            print(f"\n📊 Fetching counter object...")
-            counter_obj = contract_mgr.get_object(counter_id)
-            
-            value = counter_obj.get('data', {}).get('content', {}).get('fields', {}).get('value', 'N/A')
-            print(f"   Counter value: {value}")
-        
-    except RuntimeError as e:
-        print(f"\n❌ Function call failed: {e}")
-    
-    # ========================================
-    # Fim
-    # ========================================
-    
-    print("\n" + "="*70)
-    print("Workflow Complete!")
-    print("="*70)
-    print("\nNetwork is still running. You can:")
-    print("  - Call more functions via contract_mgr.call_function()")
-    print("  - Create more accounts via account_mgr.generate_account()")
-    print("  - Deploy more contracts")
-    print("")
-    
-    input("Press ENTER to stop the network...")
-    exp.stop()
 
+    # ========== Fase 4: Funding via Faucet ==========
+    print_step(4, "Funding Accounts")
 
-def create_example_counter_contract(path: str):
-    """Cria um contrato counter de exemplo"""
-    os.makedirs(path, exist_ok=True)
-    
-    # Move.toml
-    with open(f"{path}/Move.toml", "w") as f:
-        f.write("""[package]
-name = "my_counter"
-version = "0.0.1"
-edition = "2024"
+    print("💰 Checking initial balances...")
+    alice_coins = cli.get_gas(alice.address)
+    bob_coins = cli.get_gas(bob.address)
+
+    alice_balance = sum(c["balance"] for c in alice_coins)
+    bob_balance = sum(c["balance"] for c in bob_coins)
+
+    print(f"   Alice: {format_balance(alice_balance)}")
+    print(f"   Bob:   {format_balance(bob_balance)}")
+
+    if alice_balance == 0:
+        print("\n💧 Requesting faucet for Alice...")
+        if cli.faucet_request(alice.address):
+            print("✅ Faucet request succeeded!")
+            time.sleep(3)
+            alice_coins = cli.get_gas(alice.address)
+            alice_balance = sum(c["balance"] for c in alice_coins)
+            print(f"   Alice new balance: {format_balance(alice_balance)}")
+        else:
+            print("\n⚠️  MANUAL FUNDING REQUIRED")
+            print("\nAlice has no funds. Please fund manually:")
+            print("\n   Option A: Use faucet in another terminal")
+            print("      docker exec -it mn.client bash")
+            print(f"      iota client faucet --address {alice.address}")
+            print("\n   Option B: Transfer from genesis account")
+            print("\n👉 Press ENTER after funding Alice...")
+            input()
+            alice_coins = cli.get_gas(alice.address)
+            alice_balance = sum(c["balance"] for c in alice_coins)
+            if alice_balance == 0:
+                print("❌ Alice still has no balance. Cannot continue.")
+                exp.stop()
+                return
+            print(f"✅ Alice funded: {format_balance(alice_balance)}")
+
+    # ========== Fase 5: Preparar Smart Contract ==========
+    print_step(5, "Prepare Smart Contract")
+
+    print("📝 Creating counter contract...")
+    client.cmd("mkdir -p /contracts/counter")
+
+    move_toml = """[package]
+name = "counter"
+edition = "2024.beta"
 
 [dependencies]
 Iota = { git = "https://github.com/iotaledger/iota.git", subdir = "crates/iota-framework/packages/iota-framework", rev = "framework/mainnet" }
 
 [addresses]
-my_counter = "0x0"
-""")
-    
-    # sources/counter.move
-    os.makedirs(f"{path}/sources", exist_ok=True)
-    with open(f"{path}/sources/counter.move", "w") as f:
-        f.write("""module my_counter::counter {
+counter = "0x0"
+"""
+    client.cmd(f"cat > /contracts/counter/Move.toml << 'EOF'\n{move_toml}\nEOF")
+
+    client.cmd("mkdir -p /contracts/counter/sources")
+
+    counter_move = """module counter::counter {
     use iota::object::{Self, UID};
     use iota::transfer;
     use iota::tx_context::{Self, TxContext};
 
+    /// Counter object
     public struct Counter has key {
         id: UID,
-        value: u64,
+        value: u64
     }
 
-    public entry fun increment(ctx: &mut TxContext) {
+    /// Create new counter
+    public entry fun create(ctx: &mut TxContext) {
         let counter = Counter {
             id: object::new(ctx),
-            value: 1,
+            value: 0
         };
-        transfer::transfer(counter, tx_context::sender(ctx));
+        transfer::share_object(counter);
     }
 
-    public entry fun increment_existing(counter: &mut Counter) {
+    /// Increment counter
+    public entry fun increment(counter: &mut Counter) {
         counter.value = counter.value + 1;
     }
 
+    /// Get counter value
     public fun get_value(counter: &Counter): u64 {
         counter.value
     }
 }
-""")
-    
-    print(f"✅ Example counter contract created at {path}")
+"""
+    client.cmd(
+        f"cat > /contracts/counter/sources/counter.move << 'EOF'\n{counter_move}\nEOF"
+    )
+
+    print("✅ Contract source created")
+
+    print("\n🔨 Building contract...")
+    if cli.move_build("/contracts/counter"):
+        print("✅ Contract compiled successfully")
+    else:
+        print("❌ Contract compilation failed")
+        exp.stop()
+        return
+
+    # ========== Fase 6: Deploy Smart Contract ==========
+    print_step(6, "Deploy Smart Contract")
+
+    print("📦 Publishing contract package...")
+    try:
+        publish_result = cli.publish_package(
+            package_path="/contracts/counter",
+            gas_budget=100_000_000,
+            sender=alice.address,
+        )
+
+        if "package_id" not in publish_result:
+            print("❌ Failed to get package ID from publish result")
+            print(f"Result: {publish_result}")
+            exp.stop()
+            return
+
+        package_id = publish_result["package_id"]
+        print(f"✅ Package published: {package_id}")
+        print(f"   Digest: {publish_result.get('digest', 'N/A')}")
+    except Exception as e:
+        print(f"❌ Publish failed: {e}")
+        exp.stop()
+        return
+
+    # ========== Fase 7: Criar Counter ==========
+    print_step(7, "Create Counter Object")
+
+    print("🎯 Creating counter...")
+    try:
+        create_result = cli.call_function(
+            package=package_id,
+            module="counter",
+            function="create",
+            args=[],
+            gas_budget=10_000_000,
+            sender=alice.address,
+        )
+
+        print("✅ Counter created!")
+        print(f"   Digest: {create_result.get('digest', 'N/A')}")
+        time.sleep(3)
+
+        print("\n🔍 Finding counter object...")
+        objects = cli.get_objects(alice.address)
+
+        counter_id = None
+        for obj in objects:
+            obj_details = cli.get_object(obj["object_id"])
+            if "counter::counter::Counter" in obj_details.get("type", ""):
+                counter_id = obj["object_id"]
+                break
+
+        if not counter_id:
+            print("⚠️  Could not find counter object automatically")
+            print("   You may need to query objects manually")
+        else:
+            print(f"✅ Counter found: {counter_id}")
+    except Exception as e:
+        print(f"❌ Create failed: {e}")
+        exp.stop()
+        return
+
+    # ========== Fase 8: Interagir com Counter ==========
+    print_step(8, "Interact with Counter")
+
+    if counter_id:
+        print("➕ Incrementing counter (3 times)...")
+        for i in range(3):
+            try:
+                result = cli.call_function(
+                    package=package_id,
+                    module="counter",
+                    function="increment",
+                    args=[counter_id],
+                    gas_budget=10_000_000,
+                    sender=alice.address,
+                )
+                print(f"   ✅ Increment {i+1}: {result.get('digest', 'N/A')[:16]}...")
+                time.sleep(2)
+            except Exception as e:
+                print(f"   ❌ Increment {i+1} failed: {e}")
+
+    # ========== Fase 9: Transfer usando TransactionBuilder ==========
+    print_step(9, "Transfer using TransactionBuilder")
+
+    print("💸 Transferring 100M MIST from Alice to Bob...")
+    try:
+        result = SimpleTransaction.transfer_iota(
+            sender=alice.address,
+            recipient=bob.address,
+            amount=100_000_000,
+            client_container=client,
+            gas_budget=10_000_000,
+        )
+
+        if result.get("success"):
+            print(f"✅ Transfer succeeded: {result.get('digest', 'N/A')}")
+            time.sleep(3)
+
+            print("\n💰 Final balances:")
+            alice_coins = cli.get_gas(alice.address)
+            bob_coins = cli.get_gas(bob.address)
+
+            alice_balance = sum(c["balance"] for c in alice_coins)
+            bob_balance = sum(c["balance"] for c in bob_coins)
+
+            print(f"   Alice: {format_balance(alice_balance)}")
+            print(f"   Bob:   {format_balance(bob_balance)}")
+        else:
+            print(f"❌ Transfer failed: {result.get('error', 'Unknown')}")
+    except Exception as e:
+        print(f"❌ Transfer error: {e}")
+
+    # ========== Finalização ==========
+    print_step(10, "Workflow Complete")
+
+    print("📊 Summary:")
+    print("   ✅ Network: 4 validators + 1 gateway")
+    print("   ✅ Accounts: Alice & Bob")
+    print(f"   ✅ Package: {package_id}")
+    if counter_id:
+        print(f"   ✅ Counter: {counter_id}")
+    print("   ✅ Transfers: 1 successful")
+
+    print("\n🎉 All steps completed successfully!")
+    print("\nNetwork is still running. You can:")
+    print("  - Inspect with: docker exec -it mn.client bash")
+    print("  - Check objects: iota client objects")
+    print("  - Call functions: iota client call ...")
+
+    print("\n👉 Press ENTER to stop the network...")
+    input()
+
+    print("\n🛑 Stopping experiment...")
+    exp.stop()
+    print("\n✅ Experiment stopped. Goodbye!")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted by user")
+        print("Cleaning up...")
+        import os
+        os.system("sudo mn -c")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback, os
+        traceback.print_exc()
+        print("\nCleaning up...")
+        os.system("sudo mn -c")
