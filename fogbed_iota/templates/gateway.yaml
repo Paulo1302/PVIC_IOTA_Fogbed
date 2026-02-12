@@ -1,0 +1,5 @@
+node:
+  db-path: "/var/lib/iota/mainnetdb"
+  grpc-bind-address: "0.0.0.0:9002"
+  rest-api-bind-address: "0.0.0.0:9000"
+  p2p-bind-address: "0.0.0.0:9003"

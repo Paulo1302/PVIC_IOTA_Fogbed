@@ -1,0 +1,17 @@
+node:
+  db-path: "/var/lib/iota/mainnetdb"
+  grpc-bind-address: "0.0.0.0:9002"
+  rest-api-bind-address: "0.0.0.0:9001"
+  p2p-bind-address: "0.0.0.0:9003"
+  
+consensus:
+  authority-key-pair:
+    path: "/custom_config/authority.key"
+  network-key-pair:
+    path: "/custom_config/network.key"
+  genesis:
+    validators:
+      - address: "10.0.0.1:9003"
+      - address: "10.0.0.2:9003"
+      - address: "10.0.0.3:9003"
+      - address: "10.0.0.4:9003"

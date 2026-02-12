@@ -1,73 +1,63 @@
 #!/usr/bin/env python3
+"""
+examples/01_basic_network_clean.py
+Exemplo com cleanup automático
+"""
 
 import sys
 import os
-# Adiciona o diretório pai ao path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import time
 from fogbed import FogbedExperiment, Container
-from mininet.log import setLogLevel, info
 from fogbed_iota import IotaNetwork
 
 def main():
-    setLogLevel("info")
-
+    print("=== Rede IOTA com Cleanup Automático ===\n")
+    
+    # Criar experimento Fogbed
     exp = FogbedExperiment()
-    cloud = exp.add_virtual_instance("cloud")
-
-    # Cria a rede IOTA
-    iota_net = IotaNetwork(exp, image="iota-dev:latest")
-
-    # 4 validadores + 1 gateway
-    iota_net.add_validator("iota1", "10.0.0.1")
-    iota_net.add_validator("iota2", "10.0.0.2")
-    iota_net.add_validator("iota3", "10.0.0.3")
-    iota_net.add_validator("iota4", "10.0.0.4")
-    iota_net.add_gateway("gateway", "10.0.0.5")
-
-    # cliente CLI
-    client = Container(
-        name="client",
-        dimage="iota-dev:latest",
-        ip="10.0.0.100",
-        privileged=True,
-        environment={"DEBIAN_FRONTEND": "noninteractive"},
-    )
-    iota_net.set_client(client)
-
-    # anexa tudo ao experimento
-    iota_net.attach_to_experiment(datacenter_name="cloud")
-
-    info("=== Iniciando FogbedExperiment ===\n")
-    exp.start()
-
-    info("=== Iniciando IotaNetwork ===\n")
-    iota_net.start()
-
-    info("=== Ambiente pronto, aguardando estabilização ===\n")
-    time.sleep(15)
-
-    # Teste simples de gas
-    info("Consultando 'iota client gas'...\n")
-    print("🔍 Testando IOTA CLI...")
-    res = client.cmd("iota --version")
-    print(f"IOTA Version: {res}")
-
-    print("🔍 Testando conectividade RPC...")
-    rpc_test = client.cmd('curl -s http://10.0.0.5:9000')
-    print(f"RPC Response: {rpc_test[:100]}...")
-
-    print("🔍 Testando client com parâmetros explícitos...")
-    gas_test = client.cmd('iota client gas --network devnet --output json')
-    print(f"Gas Query: {gas_test}")
-
-    input("Pressione ENTER para encerrar...")
-    info(f"{res}\n")
-
-    input("Pressione ENTER para encerrar...\n")
+    
+    # Usar context manager para garantir cleanup
+    with IotaNetwork(exp, image="iota-dev:latest", auto_cleanup=True) as iota_net:
+        
+        # Configurar rede
+        print("📦 Configurando rede...")
+        for i in range(1, 5):
+            iota_net.add_validator(f"iota{i}", f"10.0.0.{i}")
+        
+        iota_net.add_gateway("gateway", "10.0.0.5")
+        
+        client = Container(
+            name="client",
+            dimage="iota-dev:latest",
+            ip="10.0.0.100",
+            privileged=True
+        )
+        iota_net.set_client(client)
+        
+        # Anexar e iniciar
+        iota_net.attach_to_experiment("cloud")
+        exp.start()
+        
+        print("🚀 Iniciando rede IOTA...")
+        iota_net.start()
+        
+        print("\n✅ Rede pronta!")
+        print(f"RPC: {iota_net.get_rpc_url()}")
+        print(f"Metrics: {iota_net.get_metrics_url()}")
+        
+        # Fazer testes interativos
+        print("\n💡 Comandos úteis:")
+        print("  docker exec -it mn.client bash")
+        print("  curl -X POST http://10.0.0.5:9000 -H 'Content-Type: application/json' \\")
+        print("    -d '{\"jsonrpc\":\"2.0\",\"method\":\"iota_getChainIdentifier\",\"params\":[],\"id\":1}'")
+        
+        input("\nPressione ENTER para encerrar (cleanup automático)...")
+    
+    # Cleanup automático acontece aqui (saída do context manager)
+    print("\n🧹 Limpeza automática concluída!")
     exp.stop()
-
+    print("✅ Experimento finalizado")
 
 if __name__ == "__main__":
     main()

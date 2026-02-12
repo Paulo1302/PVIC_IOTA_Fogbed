@@ -166,7 +166,7 @@ class SmartContractManager:
             raise RuntimeError(
                 f"Insufficient balance for {sender_alias}. "
                 f"Has {balance} MIST, needs {gas_budget} MIST. "
-                f"Please fund the account first via faucet or transfer."
+                f"Please fund the account first via genesis bank transfer."
             )
         
         # Construir comando publish
@@ -186,16 +186,23 @@ class SmartContractManager:
         try:
             tx_result = json.loads(result)
             
+            # Verificar status da transação primeiro
+            status = tx_result.get('effects', {}).get('status', {})
+            if status.get('status') != 'success':
+                error = status.get('error', 'Unknown error')
+                raise RuntimeError(f"Publish transaction failed: {error}")
+            
             # Extrair package_id dos objectChanges
-            package_obj = None
-            for change in tx_result.get('objectChanges', []):
-                if change.get('type') == 'published':
-                    package_obj = change
-                    break
+            published_changes = [
+                c for c in tx_result.get('objectChanges', [])
+                if c.get('type') == 'published'
+            ]
             
-            if not package_obj:
-                raise RuntimeError(f"Package ID not found in tx result: {result}")
+            if not published_changes:
+                raise RuntimeError(f"No published packages in transaction: {result}")
             
+            # Pegar primeiro package publicado
+            package_obj = published_changes[0]
             package_id = package_obj['packageId']
             modules = package_obj.get('modules', [])
             digest = tx_result.get('digest', '')
@@ -328,10 +335,59 @@ class SmartContractManager:
         """Busca informações de pacote publicado"""
         return self.deployed_packages.get(package_name)
     
+    def fund_account_from_bank(self, target_alias: str, amount_iota: float = 10.0) -> str:
+        """
+        Transfere IOTA do banco do genesis para uma conta
+        
+        Args:
+            target_alias: Alias da conta destino
+            amount_iota: Quantidade em IOTA (será convertida para MIST)
+            
+        Returns:
+            Transaction digest
+        """
+        logger.info(f"Funding account '{target_alias}' with {amount_iota} IOTA from genesis bank")
+        
+        target_account = self.accounts.get_account(target_alias)
+        if not target_account:
+            raise ValueError(f"Target account '{target_alias}' not found")
+        
+        # Converter IOTA para MIST (1 IOTA = 10^9 MIST)
+        amount_mist = int(amount_iota * 1_000_000_000)
+        
+        # Usar keystore do genesis (banco)
+        cmd = (
+            f"iota client transfer "
+            f"--to {target_account.address} "
+            f"--amount {amount_mist} "
+            f"--gas-budget 10000000 "
+            f"--json"
+        )
+        
+        logger.debug(f"Executing: {cmd}")
+        result = self.client.cmd(cmd)
+        
+        try:
+            tx_result = json.loads(result)
+            
+            status = tx_result.get('effects', {}).get('status', {})
+            if status.get('status') != 'success':
+                error = status.get('error', 'Unknown')
+                raise RuntimeError(f"Transfer failed: {error}")
+            
+            digest = tx_result.get('digest', 'N/A')
+            logger.info(f"✅ Funded {target_alias} with {amount_iota} IOTA (tx: {digest})")
+            
+            return digest
+            
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse transfer result: {result}")
+            raise RuntimeError("Transfer output parsing failed")
+    
     def _extract_modules_from_build(self, package_path: str) -> List[str]:
         """Extrai lista de módulos do build output"""
         # Listar arquivos .mv no build/
-        cmd = f"find {package_path}/build -name '*.mv' -exec basename {{}} .mv \\;"
+        cmd = f"find {package_path}/build -name '*.mv' -exec basename {{}} .mv \\; 2>/dev/null || true"
         result = self.client.cmd(cmd)
         
         modules = [m.strip() for m in result.split('\n') if m.strip()]
