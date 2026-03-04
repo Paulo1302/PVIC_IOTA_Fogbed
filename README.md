@@ -27,6 +27,9 @@ Emulate complete IOTA blockchain networks with multiple validators and fullnodes
 - **Python 3.8+**
 - **4GB+ RAM** (recommended)
 - **sudo privileges** (required for Mininet/Fogbed)
+- **[Fogbed](https://github.com/fogbed/fogbed)** — fog/edge network emulator (includes Containernet/Mininet)
+
+> **Note:** Containernet is provided by Fogbed and does **not** need to be installed separately.
 
 ## 🚀 Quick Start
 
@@ -37,29 +40,54 @@ git clone https://github.com/your-username/fogbed-iota.git
 cd fogbed-iota
 ```
 
-### 2. Build the Docker image
-
-```bash
-docker build -f docker/Dockerfile -t iota-dev:latest .
-```
-
-### 3. Install Fogbed (if not already installed)
+### 2. Install Fogbed
 
 ```bash
 pip3 install fogbed
+# OR install from source for latest version:
+# git clone https://github.com/fogbed/fogbed.git && cd fogbed && pip install -e .
 ```
 
-### 4. Run the example
+### 3. Install this package
 
 ```bash
-sudo python3 examples/01_basic_network.py
+pip install -e .
+```
+
+### 4. Download IOTA v1.15.0 binaries and build the Docker image
+
+```bash
+# Download IOTA v1.15.0 release
+curl -L -o /tmp/iota.tgz \
+  "https://github.com/iotaledger/iota/releases/download/v1.15.0/iota-v1.15.0-linux-x86_64.tgz"
+tar -xzf /tmp/iota.tgz -C /tmp/
+
+# Copy binaries to docker/bins/ for the local build
+mkdir -p docker/bins
+cp /tmp/iota-v1.15.0-linux-x86_64/iota        docker/bins/iota
+cp /tmp/iota-v1.15.0-linux-x86_64/iota-node   docker/bins/iota-node
+chmod +x docker/bins/*
+
+# Build Docker image from local binaries (no internet required inside build)
+docker build -f docker/Dockerfile.local -t iota-dev:latest .
+```
+
+### 5. Run the example
+
+```bash
+# Clean up any previous run first
+sudo mn -c
+docker rm -f $(docker ps -aq --filter "name=mn.") 2>/dev/null
+
+sudo PYTHONPATH="$(pwd)" \
+  /opt/fogbed/venv/bin/python3 examples/02_complete_network.py
 ```
 
 That's it! 🎉 The system will automatically:
-- Extract IOTA binaries from the Docker image
-- Generate genesis configuration
-- Deploy 4 validators + 1 gateway + 1 client
-- Start all IOTA nodes
+- Generate a two-step genesis with real validator IPs embedded
+- Deploy 4 validators + 1 gateway + 1 client via Fogbed/Mininet
+- Start all IOTA nodes over a virtual network (10.0.0.x)
+- Expose RPC at `http://10.0.0.100:9000` (accessible via `docker exec mn.gateway`)
 
 ## 📚 Usage Examples
 
@@ -247,40 +275,58 @@ iota client addresses
 ### Issue: Containers already exist
 
 ```bash
-# Clean up previous network
 sudo mn -c
 docker rm -f $(docker ps -aq --filter "name=mn.")
 ```
 
-### Issue: Binary not found
+### Issue: Binary not found in Docker image
 
-The system automatically extracts the IOTA binary from the Docker image. Ensure the image exists:
+The `docker/Dockerfile` downloads binaries during build and requires internet access.  
+Use `Dockerfile.local` to build from pre-downloaded binaries in `docker/bins/`:
 
 ```bash
-docker images | grep iota-dev
+docker build -f docker/Dockerfile.local -t iota-dev:latest .
 ```
 
-If missing, rebuild:
+> **Note:** `docker/bins/` is in `.gitignore` — download binaries manually before building (see Quick Start step 4).
+
+### Issue: P2P connection errors (`unsupported p2p multiaddr`)
+
+IOTA v1.15.0 uses **UDP/QUIC** for P2P, not TCP. Ensure `external-address` in validator configs uses `/ip4/IP/udp/PORT`.
+
+### Issue: Validators not reaching consensus (connecting to `127.0.0.1`)
+
+The genesis must be generated with real validator IPs, not `127.0.0.1`. This project uses a two-step genesis:
+1. Generate initial genesis → get `network.yaml`
+2. Patch `network.yaml` with real IPs → re-run genesis → `genesis.blob` contains correct addresses
+
+### Issue: `missing field 'db-path'` on validator startup
+
+`network.yaml` (which lists all validators) was being passed as a single validator config. This is fixed — `network.yaml` is excluded from the validator template list.
+
+### Issue: RPC not accessible from host
+
+The emulated network (`10.0.0.x`) is only accessible **inside containers**. Use:
 
 ```bash
-docker build -f docker/Dockerfile -t iota-dev:latest .
-```
+# Test RPC from inside the gateway container
+docker exec mn.gateway curl -s -X POST http://127.0.0.1:9000 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"iota_getTotalTransactionBlocks","params":[],"id":1}'
 
-### Issue: Genesis generation fails
-
-Check validator IPs are valid:
-
-```bash
-# Test genesis manually
-/tmp/fogbed_iota_bin/iota genesis --working-dir /tmp/test --force
+# Or from the client (via emulated network)
+docker exec mn.client curl -s -X POST http://10.0.0.100:9000 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"iota_getTotalTransactionBlocks","params":[],"id":1}'
 ```
 
 ### Issue: Nodes not synchronizing
 
-Wait 30-60 seconds for initial sync. Check logs:
+Check logs with the correct path:
 
 ```bash
-docker exec -it mn.validator1 cat /app/iota.log | grep -i "sync\|error"
+docker exec mn.validator1 tail -20 /var/log/iota/iota-node.log
+docker exec mn.gateway   tail -20 /var/log/iota/iota-node.log
 ```
 
 ## 📁 Project Structure
@@ -292,11 +338,12 @@ fogbed-iota/
 │   ├── __version__.py     # Version information
 │   └── network.py         # Core IotaNetwork orchestrator
 ├── docker/                # Docker configurations
-│   ├── Dockerfile         # Production IOTA node image
-│   └── Dockerfile.dev     # Development image with tools
+│   ├── Dockerfile         # Production image (downloads binaries, requires internet)
+│   ├── Dockerfile.local   # Build from local binaries in docker/bins/ (offline)
+│   └── bins/              # Pre-downloaded IOTA binaries (gitignored, copy manually)
 ├── examples/              # Usage examples
 │   ├── 01_basic_network.py      # 4 validators + gateway
-│   └── 02_complete_network.py   # Advanced example
+│   └── 02_complete_network.py   # Advanced example with client
 ├── scripts/               # Utility scripts
 │   ├── build_docker.sh          # Build Docker images
 │   ├── test_network.sh          # Automated tests

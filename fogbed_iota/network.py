@@ -269,6 +269,7 @@ class IotaNetwork:
         iota_binary = self._ensure_iota_binary()
         logger.info(f"Generating genesis for {len(validators)} validators")
         
+        # Passo 1: gerar genesis inicial com localhost (cria keypairs e network.yaml)
         cmd = [
             iota_binary, "genesis",
             "--working-dir", GENESIS_DIR,
@@ -276,14 +277,76 @@ class IotaNetwork:
             "--committee-size", str(len(validators)),
         ]
         logger.debug(f"Genesis command: {' '.join(cmd)}")
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         
         genesis_blob = os.path.join(GENESIS_DIR, "genesis.blob")
         if not os.path.exists(genesis_blob):
             raise RuntimeError(f"Genesis blob not created at {genesis_blob}")
         
+        # Passo 2: patch do network.yaml com os IPs reais dos validators
+        network_yaml = os.path.join(GENESIS_DIR, "network.yaml")
+        if os.path.exists(network_yaml):
+            logger.info("Patching network.yaml with real validator IPs...")
+            self._patch_genesis_network_yaml(network_yaml, validators)
+            
+            # Passo 3: remover genesis.blob e regenerar com IPs reais
+            os.remove(genesis_blob)
+            logger.info("Re-generating genesis.blob with real validator IPs...")
+            result = subprocess.run(
+                [iota_binary, "genesis", "--working-dir", GENESIS_DIR, "--force"],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                logger.warning(f"Re-genesis failed: {result.stderr[:200]}, using original genesis")
+                # Fallback: regenerar do zero
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            if not os.path.exists(genesis_blob):
+                logger.warning("genesis.blob not recreated, regenerating from scratch...")
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+        else:
+            logger.warning("network.yaml not found, skipping IP patch")
+        
         logger.info("✅ Genesis generated successfully")
+
+    def _patch_genesis_network_yaml(self, network_yaml: str, validators: List[IotaNode]) -> None:
+        """Substitui IPs 127.0.0.1 no network.yaml pelos IPs reais dos validators."""
+        import yaml as _yaml
+        with open(network_yaml, "r") as f:
+            content = f.read()
+        
+        # Parse YAML
+        try:
+            data = _yaml.safe_load(content)
+        except Exception as e:
+            logger.warning(f"Could not parse network.yaml as YAML: {e}")
+            return
+        
+        validator_configs = data.get("validator_configs", [])
+        if not validator_configs:
+            logger.warning("No validator_configs found in network.yaml")
+            return
+        
+        for i, (cfg, node) in enumerate(zip(validator_configs, validators)):
+            # Substituir network-address (consensus) pelo IP real do validator
+            old_net_addr = cfg.get("network-address", "")
+            if old_net_addr and "127.0.0.1" in old_net_addr:
+                # Manter o mesmo porto, só trocar o IP
+                port_match = re.search(r'/tcp/(\d+)', old_net_addr)
+                port = port_match.group(1) if port_match else "8080"
+                cfg["network-address"] = f"/ip4/{node.ip_addr}/tcp/{port}/http"
+                logger.debug(f"Validator {i}: network-address {old_net_addr} → {cfg['network-address']}")
+            
+            # Substituir p2p-config
+            p2p = cfg.get("p2p-config", {})
+            if p2p:
+                p2p["listen-address"] = f"0.0.0.0:{node.p2p_port}"
+                p2p["external-address"] = f"/ip4/{node.ip_addr}/udp/{node.p2p_port}"
+        
+        with open(network_yaml, "w") as f:
+            _yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+        
+        logger.info(f"✅ network.yaml patched for {len(validators)} validators")
 
 
     def _prepare_configs(self) -> None:
@@ -297,7 +360,7 @@ class IotaNetwork:
         validator_yamls = []
         for f in yaml_files:
             base = os.path.basename(f).lower()
-            if any(skip in base for skip in ["client", "iota_config", "fullnode"]):
+            if any(skip in base for skip in ["client", "iota_config", "fullnode", "network"]):
                 continue
             validator_yamls.append(f)
         
@@ -351,7 +414,7 @@ class IotaNetwork:
                 new_lines.append(f'{indent}listen-address: "0.0.0.0:{node.p2p_port}"\n')
             elif "external-address:" in line:
                 indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f'{indent}external-address: /ip4/{node.ip_addr}/tcp/{node.p2p_port}\n')
+                new_lines.append(f'{indent}external-address: /ip4/{node.ip_addr}/udp/{node.p2p_port}\n')
             elif any(k in line for k in ["pruning-period", "num-epochs-to-retain"]):
                 continue
             else:
@@ -360,6 +423,21 @@ class IotaNetwork:
             f.writelines(new_lines)
         logger.debug(f"✅ Validator YAML patched for {node.name}")
 
+    def _extract_peer_ids(self, validator_yamls: List[str]) -> List[str]:
+        """Extrai peer-ids dos YAMLs do genesis lendo o network-key-pair ou fullnode.yaml."""
+        peer_ids = []
+        fullnode_yaml = os.path.join(GENESIS_DIR, "fullnode.yaml")
+        if os.path.exists(fullnode_yaml):
+            with open(fullnode_yaml, "r") as f:
+                content = f.read()
+            # Extrai peer-ids na ordem que aparecem no fullnode.yaml seed-peers
+            matches = re.findall(r'peer-id:\s*([a-f0-9]{64})', content)
+            if matches:
+                logger.debug(f"Extracted {len(matches)} peer-ids from fullnode.yaml")
+                return matches
+        logger.warning("⚠️  Could not extract peer-ids from fullnode.yaml, seed-peers will lack peer-id")
+        return []
+
     def _create_gateway_config(
         self,
         source: str,
@@ -367,8 +445,14 @@ class IotaNetwork:
         gateway: IotaNode,
         validators: List[IotaNode],
     ) -> None:
-        """Gera YAML válido para o gateway (fullnode)."""
+        """Gera YAML válido para o gateway (fullnode) com UDP e peer-ids corretos."""
         logger.debug(f"Creating gateway(fullnode) config: {dest}")
+
+        # Extrair peer-ids do genesis
+        yaml_files = sorted(glob.glob(os.path.join(GENESIS_DIR, "*.yaml")))
+        validator_yamls = [f for f in yaml_files if os.path.basename(f).lower() not in
+                           ["client.yaml", "fullnode.yaml", "network.yaml"]]
+        peer_ids = self._extract_peer_ids(validator_yamls)
 
         lines = [
             "---",
@@ -383,18 +467,21 @@ class IotaNetwork:
             "",
             "p2p-config:",
             f'  listen-address: "0.0.0.0:{gateway.p2p_port}"',
-            f"  external-address: /ip4/{gateway.ip_addr}/tcp/{gateway.p2p_port}",
+            f"  external-address: /ip4/{gateway.ip_addr}/udp/{gateway.p2p_port}",
             "  seed-peers:",
         ]
 
-        for v in validators:
-            lines.append(f"    - address: /ip4/{v.ip_addr}/tcp/{v.p2p_port}")
+        for i, v in enumerate(validators):
+            if i < len(peer_ids):
+                lines.append(f"    - peer-id: {peer_ids[i]}")
+                lines.append(f"      address: /ip4/{v.ip_addr}/udp/{v.p2p_port}")
+            else:
+                lines.append(f"    - address: /ip4/{v.ip_addr}/udp/{v.p2p_port}")
 
         with open(dest, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
-
-        logger.debug("✅ Gateway(fullnode) config created")
+        logger.debug("✅ Gateway(fullnode) config created with UDP peer addresses")
 
     def _inject_and_boot(self) -> None:
         logger.info("Injecting configs and booting nodes")

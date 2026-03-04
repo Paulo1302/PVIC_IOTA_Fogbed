@@ -1,0 +1,64 @@
+# docker/Dockerfile.local - Constrói usando binário local (sem download do GitHub)
+# Uso: docker build -f docker/Dockerfile.local -t iota-dev:latest .
+# Pré-requisito: colocar iota e iota-node em docker/bins/ antes de buildar
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+LABEL maintainer="Paulo <paulogrcsilva@gmail.com>"
+LABEL description="IOTA node + Move tooling for Fogbed network emulation"
+LABEL version="1.15.0-local"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libssl3 \
+      libudev1 \
+      ca-certificates \
+      libpq5 \
+      iproute2 \
+      net-tools \
+      iputils-ping \
+      curl \
+      wget \
+      jq \
+      build-essential \
+      pkg-config \
+      libssl-dev \
+      git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar Rust (necessário para iota move build)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copia binários do diretório local docker/bins/
+COPY docker/bins/iota /usr/local/bin/iota
+COPY docker/bins/iota-node /usr/local/bin/iota-node
+
+RUN chmod +x /usr/local/bin/iota /usr/local/bin/iota-node && \
+    iota --version && \
+    iota-node --version
+
+RUN mkdir -p \
+    /app/config \
+    /app/db \
+    /app/consensus_db \
+    /custom_config \
+    /root/.iota \
+    /root/.iota/iota.keystore \
+    /var/log/iota \
+    /contracts \
+    /contracts/examples
+
+EXPOSE 9000 9184 8080 8081
+
+ENV IOTA_HOME=/app
+ENV IOTA_CONFIG_DIR=/app/config
+ENV RUST_LOG=info,iota=debug
+ENV RUST_BACKTRACE=1
+
+WORKDIR /app
+
+ENTRYPOINT []
+CMD ["tail", "-f", "/dev/null"]

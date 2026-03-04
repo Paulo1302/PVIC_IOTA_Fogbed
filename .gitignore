@@ -2,6 +2,12 @@
 iota_data/
 iota_data/*
 
+# ==================== Binários IOTA (muito grandes para git) ====================
+docker/bins/
+
+# ==================== Dependências externas (usar submodule se necessário) ====================
+containernet-master/
+
 # ==================== Python ====================
 __pycache__/
 *.py[cod]
