@@ -45,17 +45,31 @@ class IotaCLI:
             if ("error" in result.lower() or "failed" in result.lower()) and ("timeout" not in result.lower()):
                 logger.warning(f"Command may have failed: {result[:250]}")
 
-            if capture_json:
-                m = re.search(r"\{.+\}", result, re.DOTALL)
-                if m:
-                    try:
-                        return json.loads(m.group(0))
-                    except json.JSONDecodeError:
-                        return result
+            # Try to parse JSON output proactively when requested or when output looks like JSON
+            if capture_json or result.strip().startswith("{") or result.strip().startswith("["):
+                try:
+                    return json.loads(result)
+                except json.JSONDecodeError:
+                    # Try to extract a JSON object/array from mixed output
+                    m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", result, re.DOTALL)
+                    if m:
+                        try:
+                            return json.loads(m.group(0))
+                        except json.JSONDecodeError:
+                            pass
+                    # Fall back to returning raw result
+                    return result
 
             return result
         except Exception as e:
             raise IotaClientException(f"CLI command failed: {e}")
+
+    def run(self, command: str, timeout: int = 30, capture_json: bool = False):
+        """
+        Backwards-compatible wrapper used by older code paths that call `run`.
+        Delegates to _execute.
+        """
+        return self._execute(command, timeout=timeout, capture_json=capture_json)
 
     # -------- Wallet --------
 
@@ -167,7 +181,7 @@ class IotaCLI:
         """
         Envia IOTA (MIST) por valor: `iota client pay-iota`.
         """
-        cmd = f"iota client pay-iota --recipients {to} --amounts {amount} --gas-budget {gas_budget}"
+        cmd = f"iota client pay-iota --recipients {to} --amounts {amount} --gas-budget {gas_budget} --json"
         if input_coin:
             cmd += f" --input-coins {input_coin}"
 
@@ -177,11 +191,27 @@ class IotaCLI:
             self.switch_address(sender)
 
         try:
-            out = self._execute(cmd, timeout=90)
-            m = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
-            if not m:
-                raise TransactionFailedException(f"pay_iota failed: {out[:500]}")
-            return m.group(1)
+            out = self._execute(cmd, timeout=90, capture_json=True)
+            if isinstance(out, dict):
+                # Try several possible digest fields
+                digest = (
+                    out.get("digest")
+                    or out.get("transactionDigest")
+                    or out.get("tx_hash")
+                    or (out.get("tx") or {}).get("digest")
+                )
+                if digest:
+                    return digest
+                # try nested effects
+                effects = out.get("effects") or {}
+                if effects and effects.get("digest"):
+                    return effects.get("digest")
+                raise TransactionFailedException(f"pay_iota failed (no digest in JSON): {out}")
+            else:
+                m = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
+                if not m:
+                    raise TransactionFailedException(f"pay_iota failed: {out[:500]}")
+                return m.group(1)
         finally:
             if sender and original:
                 self.switch_address(original)
@@ -194,9 +224,36 @@ class IotaCLI:
             return False
 
         for attempt in range(max_retries):
-            out = self._execute(f"iota client faucet --address {target}", timeout=45)
-            if "success" in out.lower() or "transferred" in out.lower():
-                return True
+            # Request faucet and prefer JSON parsing when available
+            out = self._execute(f"iota client faucet --address {target}", timeout=45, capture_json=True)
+
+            # Handle both JSON (dict) and plain-text outputs robustly
+            try:
+                if isinstance(out, dict):
+                    # Common JSON success indicators
+                    if out.get("success") is True:
+                        return True
+                    status = out.get("status") or (out.get("effects") or {}).get("status")
+                    if status == "success":
+                        return True
+                    # Fallback: search serialized JSON for keywords
+                    try:
+                        jtxt = json.dumps(out).lower()
+                        if "transferred" in jtxt or "success" in jtxt:
+                            return True
+                    except Exception:
+                        pass
+                else:
+                    if "success" in out.lower() or "transferred" in out.lower():
+                        return True
+            except Exception:
+                # Fallback to string check for any unexpected types
+                try:
+                    if "success" in str(out).lower() or "transferred" in str(out).lower():
+                        return True
+                except Exception:
+                    pass
+
             time.sleep(2)
 
         return False
@@ -208,7 +265,7 @@ class IotaCLI:
         return ("build successful" in out.lower()) or ("success" in out.lower())
 
     def publish_package(self, package_path: str, gas_budget: int = 100_000_000, sender: Optional[str] = None) -> Dict[str, Any]:
-        cmd = f"iota client publish {package_path} --gas-budget {gas_budget}"
+        cmd = f"iota client publish {package_path} --gas-budget {gas_budget} --json"
 
         original = None
         if sender:
@@ -216,15 +273,30 @@ class IotaCLI:
             self.switch_address(sender)
 
         try:
-            out = self._execute(cmd, timeout=180)
-            data = {"raw": out}
-            pm = re.search(r"Package ID:\s*(0x[a-fA-F0-9]+)", out)
-            dm = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
-            if pm:
-                data["package_id"] = pm.group(1)
-            if dm:
-                data["digest"] = dm.group(1)
-            return data
+            out = self._execute(cmd, timeout=180, capture_json=True)
+            data: Dict[str, Any] = {}
+            if isinstance(out, dict):
+                # Common JSON fields
+                if "package_id" in out:
+                    data["package_id"] = out.get("package_id")
+                if "digest" in out:
+                    data["digest"] = out.get("digest")
+                # fallback: look into objectChanges for published packages
+                published = [c for c in out.get("objectChanges", []) if c.get("type") == "published"]
+                if not data.get("package_id") and published:
+                    data["package_id"] = published[0].get("packageId")
+                data["raw"] = out
+                return data
+            else:
+                # fallback to text parsing
+                data = {"raw": out}
+                pm = re.search(r"Package ID:\s*(0x[a-fA-F0-9]+)", out)
+                dm = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
+                if pm:
+                    data["package_id"] = pm.group(1)
+                if dm:
+                    data["digest"] = dm.group(1)
+                return data
         finally:
             if sender and original:
                 self.switch_address(original)
@@ -246,7 +318,7 @@ class IotaCLI:
         if type_args:
             cmd += " --type-args " + " ".join(type_args)
 
-        cmd += f" --gas-budget {gas_budget}"
+        cmd += f" --gas-budget {gas_budget} --json"
 
         original = None
         if sender:
@@ -254,16 +326,32 @@ class IotaCLI:
             self.switch_address(sender)
 
         try:
-            out = self._execute(cmd, timeout=90)
-            data = {"raw": out}
-            dm = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
-            if dm:
-                data["digest"] = dm.group(1)
-            if "Status : Success" in out or "Status: Success" in out:
-                data["status"] = "success"
-            elif "Status : Failure" in out or "Status: Failure" in out:
-                data["status"] = "failure"
-            return data
+            out = self._execute(cmd, timeout=90, capture_json=True)
+            if isinstance(out, dict):
+                data = out
+                # normalize digest
+                digest = out.get("digest") or out.get("transactionDigest") or (out.get("effects") or {}).get("digest")
+                if digest:
+                    data["digest"] = digest
+                status = (out.get("effects") or {}).get("status") or out.get("status")
+                if isinstance(status, dict):
+                    if status.get("status") == "success":
+                        data["status"] = "success"
+                    else:
+                        data["status"] = status.get("status")
+                elif str(status).lower() == "success":
+                    data["status"] = "success"
+                return data
+            else:
+                data = {"raw": out}
+                dm = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
+                if dm:
+                    data["digest"] = dm.group(1)
+                if "Status : Success" in out or "Status: Success" in out:
+                    data["status"] = "success"
+                elif "Status : Failure" in out or "Status: Failure" in out:
+                    data["status"] = "failure"
+                return data
         finally:
             if sender and original:
                 self.switch_address(original)

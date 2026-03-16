@@ -94,7 +94,13 @@ class TransactionCommand:
             )
         
         elif self.type == TransactionType.TRANSFER_OBJECT:
-            objects = " ".join(self.object_ids)
+            objects_formatted = []
+            for o in self.object_ids:
+                if isinstance(o, TransactionArgument):
+                    objects_formatted.append(o.to_cli_arg())
+                else:
+                    objects_formatted.append(str(o))
+            objects = ",".join(objects_formatted)
             return f"--transfer-objects '[{objects}]' {self.recipient}"
         
         elif self.type == TransactionType.SPLIT_COIN:
@@ -105,7 +111,7 @@ class TransactionCommand:
             coins = " ".join(self.object_ids)
             return f"--merge-coins gas '[{coins}]'"
         
-        return ""
+        raise NotImplementedError(f"Unsupported transaction command type: {self.type}")
 
 
 class TransactionBuilder:
@@ -269,14 +275,22 @@ class TransactionBuilder:
         """
         if len(recipients) != len(amounts):
             raise ValueError("Recipients and amounts must have same length")
-        
-        # Split gas coin nos valores necessários
+
+        # Split gas coin nos valores necessários — isso cria results 0..N-1
         self.split_coins(amounts)
-        
-        # Transferir cada split para seu destinatário
-        # Nota: isso é uma simplificação - na prática precisa usar Results
+
+        # Após o split, criar transfer-objects referenciando os results
+        for idx, recipient in enumerate(recipients):
+            arg = TransactionArgument(type="Result", value=idx)
+            cmd = TransactionCommand(
+                type=TransactionType.TRANSFER_OBJECT,
+                object_ids=[arg],
+                recipient=recipient
+            )
+            self.commands.append(cmd)
+
         logger.debug(f"Added transfer_iota: {len(recipients)} transfers")
-        
+
         return self
     
     def build_cli_command(self) -> str:

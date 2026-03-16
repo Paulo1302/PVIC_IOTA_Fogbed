@@ -3,6 +3,7 @@ __version__ = "1.1.0"
 
 from .rpc_client import IotaRpcClient, AsyncIotaRpcClient
 from .graphql_client import IotaGraphQLClient
+from .transaction import TransactionBuilder, SimpleTransaction
 from .exceptions import (
     IotaClientError,
     IotaRpcError, 
@@ -19,5 +20,7 @@ __all__ = [
     "IotaRpcError",
     "IotaConnectionError",
     "IotaTimeoutError",
-    "IotaGraphQLError"
+    "IotaGraphQLError",
+    "TransactionBuilder",
+    "SimpleTransaction"
 ]
