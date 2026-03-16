@@ -66,10 +66,11 @@ class TransactionCommand:
     
     # Para transfers
     recipient: Optional[str] = None
-    object_ids: List[str] = field(default_factory=list)
+    object_ids: List[Union[str, TransactionArgument]] = field(default_factory=list)
     
     # Para coin operations
     amounts: List[int] = field(default_factory=list)
+    primary_coin: Optional[Union[str, TransactionArgument]] = None
     
     def to_cli_string(self) -> str:
         """Converte comando para string CLI"""
@@ -104,12 +105,30 @@ class TransactionCommand:
             return f"--transfer-objects '[{objects}]' {self.recipient}"
         
         elif self.type == TransactionType.SPLIT_COIN:
+            if isinstance(self.primary_coin, TransactionArgument):
+                coin = self.primary_coin.to_cli_arg()
+            elif self.primary_coin:
+                coin = str(self.primary_coin)
+            else:
+                coin = "gas"
             amounts = ",".join(str(a) for a in self.amounts)
-            return f"--split-coins gas '[{amounts}]'"
+            return f"--split-coins {coin} '[{amounts}]'"
         
         elif self.type == TransactionType.MERGE_COIN:
-            coins = " ".join(self.object_ids)
-            return f"--merge-coins gas '[{coins}]'"
+            if isinstance(self.primary_coin, TransactionArgument):
+                coin = self.primary_coin.to_cli_arg()
+            elif self.primary_coin:
+                coin = str(self.primary_coin)
+            else:
+                coin = "gas"
+            coins_formatted = []
+            for c in self.object_ids:
+                if isinstance(c, TransactionArgument):
+                    coins_formatted.append(c.to_cli_arg())
+                else:
+                    coins_formatted.append(str(c))
+            coins = ",".join(coins_formatted)
+            return f"--merge-coins {coin} '[{coins}]'"
         
         raise NotImplementedError(f"Unsupported transaction command type: {self.type}")
 
@@ -181,7 +200,7 @@ class TransactionBuilder:
     
     def transfer_objects(
         self,
-        object_ids: List[str],
+        object_ids: List[Union[str, TransactionArgument]],
         recipient: str
     ) -> 'TransactionBuilder':
         """
@@ -208,7 +227,7 @@ class TransactionBuilder:
     def split_coins(
         self,
         amounts: List[int],
-        coin_id: Optional[str] = None
+        coin_id: Optional[Union[str, TransactionArgument]] = None
     ) -> 'TransactionBuilder':
         """
         Divide uma moeda em múltiplas moedas menores
@@ -223,7 +242,7 @@ class TransactionBuilder:
         cmd = TransactionCommand(
             type=TransactionType.SPLIT_COIN,
             amounts=amounts,
-            object_ids=[coin_id] if coin_id else []
+            primary_coin=coin_id
         )
         
         self.commands.append(cmd)
@@ -233,8 +252,8 @@ class TransactionBuilder:
     
     def merge_coins(
         self,
-        coin_ids: List[str],
-        into_coin: Optional[str] = None
+        coin_ids: List[Union[str, TransactionArgument]],
+        into_coin: Optional[Union[str, TransactionArgument]] = None
     ) -> 'TransactionBuilder':
         """
         Mescla múltiplas moedas em uma
@@ -248,7 +267,8 @@ class TransactionBuilder:
         """
         cmd = TransactionCommand(
             type=TransactionType.MERGE_COIN,
-            object_ids=coin_ids
+            object_ids=coin_ids,
+            primary_coin=into_coin
         )
         
         self.commands.append(cmd)
@@ -403,22 +423,29 @@ class TransactionBuilder:
         digest_match = re.search(r'Transaction Digest:\s*([A-Za-z0-9]+)', output)
         if digest_match:
             result['digest'] = digest_match.group(1)
-            result['success'] = True
         
-        # Buscar status
-        if 'Status : Success' in output or 'executed successfully' in output.lower():
+        status_success = bool(re.search(r'Status\s*:\s*Success', output, re.IGNORECASE)) or "executed successfully" in output.lower()
+        status_failure = bool(re.search(r'Status\s*:\s*Failure', output, re.IGNORECASE))
+        error_match = re.search(r'(?mi)^\s*(?:Error|Failure)\s*:?\s*(.+)\s*$', output)
+        fatal_error_hint = bool(re.search(r'(?mi)^\s*(?:error|failed)\b', output))
+
+        if status_success:
             result['success'] = True
-        elif 'Status : Failure' in output or 'error' in output.lower():
+        elif status_failure:
             result['success'] = False
-            # Extrair mensagem de erro
-            error_match = re.search(r'(?:Error|Failure):\s*(.+)', output, re.IGNORECASE)
-            if error_match:
-                result['error'] = error_match.group(1).strip()
+        elif 'digest' in result and not fatal_error_hint:
+            # fallback: alguns comandos imprimem digest sem status explícito
+            result['success'] = True
+        elif fatal_error_hint:
+            result['success'] = False
+
+        if not result['success'] and error_match:
+            result['error'] = error_match.group(1).strip()
         
         # Buscar gas usado
-        gas_match = re.search(r'Gas Used:\s*(\d+)', output)
+        gas_match = re.search(r'Gas Used:\s*([0-9,]+)', output)
         if gas_match:
-            result['gas_used'] = int(gas_match.group(1))
+            result['gas_used'] = int(gas_match.group(1).replace(",", ""))
         
         return result
     
@@ -428,11 +455,37 @@ class TransactionBuilder:
             'success': False,
             'raw_output': output
         }
-        
-        # Extrair estimativa de gas
-        gas_match = re.search(r'Estimated Gas:\s*(\d+)', output)
+
+        parsed_json = None
+        trimmed = output.strip()
+        if trimmed.startswith("{") or trimmed.startswith("["):
+            try:
+                parsed_json = json.loads(trimmed)
+            except json.JSONDecodeError:
+                parsed_json = None
+        else:
+            m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", output, re.DOTALL)
+            if m:
+                try:
+                    parsed_json = json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    parsed_json = None
+
+        if isinstance(parsed_json, dict):
+            result["json"] = parsed_json
+            gas_used = parsed_json.get("gasUsed") or (parsed_json.get("effects") or {}).get("gasUsed")
+            if isinstance(gas_used, dict):
+                computation = int(gas_used.get("computationCost", 0) or 0)
+                storage = int(gas_used.get("storageCost", 0) or 0)
+                rebate = int(gas_used.get("storageRebate", 0) or 0)
+                result["estimated_gas"] = max(0, computation + storage - rebate)
+            result["success"] = "error" not in parsed_json
+            return result
+
+        # Extrair estimativa de gas em saída textual
+        gas_match = re.search(r'Estimated Gas:\s*([0-9,]+)', output)
         if gas_match:
-            result['estimated_gas'] = int(gas_match.group(1))
+            result['estimated_gas'] = int(gas_match.group(1).replace(",", ""))
             result['success'] = True
         
         return result
@@ -513,5 +566,4 @@ class SimpleTransaction:
         tx.move_call(package, module, function, args, type_args)
         
         return tx.execute(client_container)
-
 

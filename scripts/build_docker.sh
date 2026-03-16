@@ -19,11 +19,15 @@ docker build \
     .
 
 echo ""
-echo "📦 Building development image..."
-docker build \
-    -t "${IMAGE_NAME}:dev" \
-    -f docker/Dockerfile.dev \
-    .
+if [ -f docker/Dockerfile.dev ]; then
+  echo "📦 Building development image..."
+  docker build \
+      -t "${IMAGE_NAME}:dev" \
+      -f docker/Dockerfile.dev \
+      .
+else
+  echo "⚠️ docker/Dockerfile.dev not found; skipping development image build."
+fi
 
 echo ""
 echo "✅ Build completed!"

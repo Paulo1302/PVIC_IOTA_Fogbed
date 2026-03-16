@@ -225,11 +225,17 @@ class IotaNetwork:
         logger.info(f"Extracting binary from image: {self.image}")
         temp_bin_dir = "/tmp/fogbed_iota_bin"
         os.makedirs(temp_bin_dir, exist_ok=True)
-        result = subprocess.run(["docker", "create", "--rm", self.image], capture_output=True, text=True, check=True)
+        # Use `docker create` without --rm (not supported) and ensure the created container is removed after copy
+        result = subprocess.run(["docker", "create", self.image], capture_output=True, text=True, check=True)
         container_id = result.stdout.strip()
         iota_temp_path = f"{temp_bin_dir}/iota"
-        subprocess.run(["docker", "cp", f"{container_id}:/usr/local/bin/iota", iota_temp_path], check=True, capture_output=True)
-        subprocess.run(["docker", "rm", container_id], check=True, capture_output=True)
+        try:
+            subprocess.run(["docker", "cp", f"{container_id}:/usr/local/bin/iota", iota_temp_path], check=True, capture_output=True)
+        finally:
+            try:
+                subprocess.run(["docker", "rm", "-f", container_id], check=True, capture_output=True)
+            except Exception:
+                logger.debug(f"Failed to remove temporary container: {container_id}")
         os.chmod(iota_temp_path, 0o755)
         self._validate_binary_version(iota_temp_path)
         self._iota_binary_path = iota_temp_path
@@ -268,46 +274,37 @@ class IotaNetwork:
         
         iota_binary = self._ensure_iota_binary()
         logger.info(f"Generating genesis for {len(validators)} validators")
-        
-        # Passo 1: gerar genesis inicial com localhost (cria keypairs e network.yaml)
+
+        # Generate genesis directly with real validator IPs.
+        # This avoids localhost committee addresses that stall consensus at checkpoint 0.
+        benchmark_ips = [v.ip_addr for v in validators]
         cmd = [
             iota_binary, "genesis",
             "--working-dir", GENESIS_DIR,
             "--force", "--with-faucet",
             "--committee-size", str(len(validators)),
+            "--benchmark-ips", *benchmark_ips,
         ]
         logger.debug(f"Genesis command: {' '.join(cmd)}")
         subprocess.run(cmd, capture_output=True, text=True, check=True)
-        
+
         genesis_blob = os.path.join(GENESIS_DIR, "genesis.blob")
+        network_yaml = os.path.join(GENESIS_DIR, "network.yaml")
         if not os.path.exists(genesis_blob):
             raise RuntimeError(f"Genesis blob not created at {genesis_blob}")
-        
-        # Passo 2: patch do network.yaml com os IPs reais dos validators
-        network_yaml = os.path.join(GENESIS_DIR, "network.yaml")
-        if os.path.exists(network_yaml):
-            logger.info("Patching network.yaml with real validator IPs...")
-            self._patch_genesis_network_yaml(network_yaml, validators)
-            
-            # Passo 3: remover genesis.blob e regenerar com IPs reais
-            os.remove(genesis_blob)
-            logger.info("Re-generating genesis.blob with real validator IPs...")
-            result = subprocess.run(
-                [iota_binary, "genesis", "--working-dir", GENESIS_DIR, "--force"],
-                capture_output=True, text=True
+        if not os.path.exists(network_yaml):
+            raise RuntimeError(f"network.yaml not created at {network_yaml}")
+
+        # Guardrail: fail fast if committee still points to localhost.
+        with open(network_yaml, "r", encoding="utf-8") as f:
+            network_content = f.read()
+        if "/ip4/127.0.0.1/" in network_content:
+            raise RuntimeError(
+                "Generated network.yaml still contains localhost committee addresses; "
+                "consensus will stall. Check genesis --benchmark-ips support."
             )
-            if result.returncode != 0:
-                logger.warning(f"Re-genesis failed: {result.stderr[:200]}, using original genesis")
-                # Fallback: regenerar do zero
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
-            
-            if not os.path.exists(genesis_blob):
-                logger.warning("genesis.blob not recreated, regenerating from scratch...")
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
-        else:
-            logger.warning("network.yaml not found, skipping IP patch")
-        
-        logger.info("✅ Genesis generated successfully")
+
+        logger.info("✅ Genesis generated successfully with benchmark IPs")
 
     def _patch_genesis_network_yaml(self, network_yaml: str, validators: List[IotaNode]) -> None:
         """Substitui IPs 127.0.0.1 no network.yaml pelos IPs reais dos validators."""
@@ -341,7 +338,8 @@ class IotaNetwork:
             p2p = cfg.get("p2p-config", {})
             if p2p:
                 p2p["listen-address"] = f"0.0.0.0:{node.p2p_port}"
-                p2p["external-address"] = f"/ip4/{node.ip_addr}/udp/{node.p2p_port}"
+                # Use QUIC transport for UDP addresses to match iota-node expectations
+                p2p["external-address"] = f"/ip4/{node.ip_addr}/udp/{node.p2p_port}/quic"
         
         with open(network_yaml, "w") as f:
             _yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
@@ -414,7 +412,8 @@ class IotaNetwork:
                 new_lines.append(f'{indent}listen-address: "0.0.0.0:{node.p2p_port}"\n')
             elif "external-address:" in line:
                 indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f'{indent}external-address: /ip4/{node.ip_addr}/udp/{node.p2p_port}\n')
+                # Ensure QUIC transport is appended so multiaddrs are valid for iota-node
+                new_lines.append(f'{indent}external-address: /ip4/{node.ip_addr}/udp/{node.p2p_port}/quic\n')
             elif any(k in line for k in ["pruning-period", "num-epochs-to-retain"]):
                 continue
             else:
@@ -467,16 +466,16 @@ class IotaNetwork:
             "",
             "p2p-config:",
             f'  listen-address: "0.0.0.0:{gateway.p2p_port}"',
-            f"  external-address: /ip4/{gateway.ip_addr}/udp/{gateway.p2p_port}",
+            f"  external-address: /ip4/{gateway.ip_addr}/udp/{gateway.p2p_port}/quic",
             "  seed-peers:",
         ]
 
         for i, v in enumerate(validators):
             if i < len(peer_ids):
                 lines.append(f"    - peer-id: {peer_ids[i]}")
-                lines.append(f"      address: /ip4/{v.ip_addr}/udp/{v.p2p_port}")
+                lines.append(f"      address: /ip4/{v.ip_addr}/udp/{v.p2p_port}/quic")
             else:
-                lines.append(f"    - address: /ip4/{v.ip_addr}/udp/{v.p2p_port}")
+                lines.append(f"    - address: /ip4/{v.ip_addr}/udp/{v.p2p_port}/quic")
 
         with open(dest, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -583,37 +582,40 @@ class IotaNetwork:
         rpc_node = next((n for n in self.nodes if n.role == "fullnode"), self.nodes[0] if self.nodes else None)
         if not rpc_node:
             raise RuntimeError("No nodes available for client configuration")
-        self.client_container.cmd("mkdir -p /root/.iota/iota_config")
-        host_keystore = os.path.join(GENESIS_DIR, "iota.keystore")
-        if not os.path.exists(host_keystore):
-            host_keystore = os.path.join(GENESIS_DIR, "benchmark.keystore")
+        self.client_container.cmd("mkdir -p /app/config /root/.iota /root/.iota/iota_config")
+        benchmark_keystore = os.path.join(GENESIS_DIR, "benchmark.keystore")
+        default_keystore = os.path.join(GENESIS_DIR, "iota.keystore")
+        host_keystore = benchmark_keystore if os.path.exists(benchmark_keystore) else default_keystore
         if not os.path.exists(host_keystore):
             logger.warning("⚠️ No genesis keystore found, client may not have funds")
         else:
-            cmd_cp = f"docker cp {host_keystore} mn.{self.client_container.name}:/root/.iota/iota.keystore"
+            cmd_cp = f"docker cp {host_keystore} mn.{self.client_container.name}:/app/config/iota.keystore"
             rc = os.system(cmd_cp)
             if rc != 0:
                 raise RuntimeError(f"Failed to copy keystore to client (rc={rc})")
-            logger.debug("✅ Genesis keystore copied")
+            self.client_container.cmd("cp -f /app/config/iota.keystore /root/.iota/iota.keystore")
+            logger.debug(f"✅ Genesis keystore copied from {os.path.basename(host_keystore)}")
         rpc_url = f"http://{rpc_node.ip_addr}:{rpc_node.rpc_port}"
         yaml_content = f"""---
 keystore:
-  File: /root/.iota/iota.keystore
+  File: /app/config/iota.keystore
 envs:
-  - alias: fogbed
+  - alias: localnet
     rpc: "{rpc_url}"
     ws: ~
     basic_auth: ~
-active_env: fogbed
+    faucet: ~
+active_env: localnet
 """
-        self.client_container.cmd(f"cat > /root/.iota/iota_config/client.yaml << 'EOF'\n{yaml_content}\nEOF")
-        validate_cmd = 'python3 -c "import yaml; yaml.safe_load(open(\'/root/.iota/iota_config/client.yaml\'))" 2>&1'
+        self.client_container.cmd(f"cat > /app/config/client.yaml << 'EOF'\n{yaml_content}\nEOF")
+        self.client_container.cmd("cp -f /app/config/client.yaml /root/.iota/iota_config/client.yaml")
+        validate_cmd = 'python3 -c "import yaml; yaml.safe_load(open(\'/app/config/client.yaml\'))" 2>&1'
         validate_result = self.client_container.cmd(validate_cmd)
         if "error" in validate_result.lower() or "exception" in validate_result.lower():
             logger.error(f"❌ Generated client.yaml is invalid:\n{validate_result}")
             raise RuntimeError("Invalid client.yaml generated")
         logger.debug("✅ client.yaml validated")
-        self.client_container.cmd("sh -lc 'iota client --client.config /root/.iota/iota_config/client.yaml envs 2>&1 || true'")
+        self.client_container.cmd("sh -lc 'iota client --client.config /app/config/client.yaml envs 2>&1 || true'")
         logger.info(f"✅ Client configured (RPC: {rpc_url})")
 
     def _setup_smart_contract_env(self) -> None:
@@ -646,7 +648,7 @@ active_env: fogbed
             logger.info(f"  - Metrics: http://{gw.ip_addr}:{gw.metrics_port}/metrics")
         if self.client_container:
             logger.info(f" Client: {self.client_container.name}")
-            logger.info(f"  - Config: /root/.iota/iota_config/client.yaml")
+            logger.info(f"  - Config: /app/config/client.yaml")
         logger.info("")
 
     def get_rpc_url(self) -> Optional[str]:
@@ -676,4 +678,3 @@ active_env: fogbed
         for i in range(gateways):
             net.add_gateway(f"gateway{i+1}", f"10.0.0.{100+i}")
         return net
-

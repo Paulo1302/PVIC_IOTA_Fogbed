@@ -7,6 +7,7 @@ Centraliza e simplifica operações CLI do IOTA
 
 import json
 import re
+import shlex
 import time
 from typing import Dict, List, Optional, Any
 
@@ -20,11 +21,34 @@ logger = get_logger("cli")
 
 
 class IotaCLI:
-    def __init__(self, container, network: str = "localnet"):
+    def __init__(self, container, network: str = "localnet", client_config: str = "/app/config/client.yaml"):
         self.container = container
         self.network = network
+        self.client_config = client_config
         self._verify_cli_available()
+        self._select_network_best_effort()
         logger.info(f"IotaCLI initialized for network: {network}")
+
+    def _prepare_command(self, command: str) -> str:
+        cmd = command.strip()
+        if not self.client_config:
+            return cmd
+        if "--client.config" in cmd:
+            return cmd
+        if re.match(r"^iota\s+client\b", cmd):
+            cfg = shlex.quote(self.client_config)
+            return re.sub(r"^iota\s+client\b", f"iota client --client.config {cfg}", cmd, count=1)
+        return cmd
+
+    def _select_network_best_effort(self) -> None:
+        if not self.network:
+            return
+        try:
+            envs_out = self._execute("iota client envs", timeout=10)
+            if self.network in envs_out:
+                self._execute(f"iota client switch --env {self.network}", timeout=10)
+        except Exception as e:
+            logger.debug(f"Skipping env auto-switch ({self.network}): {e}")
 
     def _verify_cli_available(self) -> bool:
         try:
@@ -38,7 +62,8 @@ class IotaCLI:
             return False
 
     def _execute(self, command: str, timeout: int = 30, capture_json: bool = False):
-        full_cmd = f"timeout {timeout} {command}"
+        prepared = self._prepare_command(command)
+        full_cmd = f"timeout {timeout} {prepared}"
         try:
             result = self.container.cmd(full_cmd)
 
@@ -359,7 +384,7 @@ class IotaCLI:
     def ensure_managed_address(self) -> str:
         out = self.run("iota client addresses")
         if "No managed addresses" in out:
-            self.run("iota client new-address ed25519")
+            self.run("iota client new-address --key-scheme ed25519 --json")
             out = self.run("iota client addresses")
 
         # parse do primeiro 0x...

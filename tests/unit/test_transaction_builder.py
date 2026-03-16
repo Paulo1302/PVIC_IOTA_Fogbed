@@ -31,3 +31,37 @@ def test_parse_dry_run_result():
     parsed = tb._parse_dry_run_result(out)
     assert parsed["success"] is True
     assert parsed["estimated_gas"] == 5678
+
+
+def test_split_and_merge_respect_target_coin():
+    tx = TransactionBuilder("0xSENDER")
+    tx.split_coins([11, 22], coin_id="0xCOIN")
+    tx.merge_coins(["0xA", "0xB"], into_coin="0xTARGET")
+    cmd = tx.build_cli_command()
+
+    assert "--split-coins 0xCOIN '[11,22]'" in cmd
+    assert "--merge-coins 0xTARGET '[0xA,0xB]'" in cmd
+
+
+def test_parse_execution_result_success_with_error_word_in_log_line():
+    tb = TransactionBuilder("0xS")
+    out = (
+        "2026-03-16T00:00:00Z INFO iota: starting\n"
+        "2026-03-16T00:00:01Z ERROR iota: transient telemetry log\n"
+        "Transaction Digest: ABC999\n"
+        "Status : Success\n"
+    )
+    parsed = tb._parse_execution_result(out)
+    assert parsed["success"] is True
+    assert parsed["digest"] == "ABC999"
+
+
+def test_parse_dry_run_json_gas_used():
+    tb = TransactionBuilder("0xS")
+    out = (
+        '{"effects":{"gasUsed":{"computationCost":"100",'
+        '"storageCost":"40","storageRebate":"10"}}}'
+    )
+    parsed = tb._parse_dry_run_result(out)
+    assert parsed["success"] is True
+    assert parsed["estimated_gas"] == 130
