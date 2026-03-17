@@ -50,14 +50,8 @@ venv/
 ENV/
 env/
 
-# ==================== Docker ====================
-.dockerignore
-
-# ==================== Git ====================
-.git/
-.gitignore
-
 # ==================== Misc ====================
+run_final.sh
 .env
 .env.local
 *.log

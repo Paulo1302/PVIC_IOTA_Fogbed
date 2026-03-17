@@ -278,12 +278,15 @@ class IotaNetwork:
         # Generate genesis directly with real validator IPs.
         # This avoids localhost committee addresses that stall consensus at checkpoint 0.
         benchmark_ips = [v.ip_addr for v in validators]
+        chain_start_ms = str(int(time.time() * 1000))
         cmd = [
             iota_binary, "genesis",
             "--working-dir", GENESIS_DIR,
-            "--force", "--with-faucet",
+            "--force",
             "--committee-size", str(len(validators)),
             "--benchmark-ips", *benchmark_ips,
+            "--chain-start-timestamp-ms", chain_start_ms,
+            "--epoch-duration-ms", "86400000",  # 24 horas
         ]
         logger.debug(f"Genesis command: {' '.join(cmd)}")
         subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -402,7 +405,14 @@ class IotaNetwork:
                 new_lines.append(f'{indent}genesis-file-location: "/custom_config/genesis.blob"\n')
             elif "network-address:" in line:
                 indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f"{indent}network-address: /ip4/0.0.0.0/tcp/8080/http\n")
+                # Preserve the port from the genesis template (2000, 2010, 2020, 2030)
+                # so the quorum driver can find validators at the addresses in genesis.blob
+                port_match = re.search(r'/tcp/(\d+)', line)
+                if port_match:
+                    net_port = port_match.group(1)
+                else:
+                    net_port = str(2000 + all_validators.index(node) * 10)
+                new_lines.append(f"{indent}network-address: /ip4/0.0.0.0/tcp/{net_port}/http\n")
             elif "metrics-address:" in line:
                 indent = " " * (len(line) - len(line.lstrip()))
                 new_lines.append(f'{indent}metrics-address: "0.0.0.0:9184"\n')

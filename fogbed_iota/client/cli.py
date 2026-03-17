@@ -286,7 +286,7 @@ class IotaCLI:
     # -------- Move --------
 
     def move_build(self, package_path: str) -> bool:
-        out = self._execute(f"iota move build --path {package_path}", timeout=120)
+        out = self._execute(f"iota move build --path {package_path}", timeout=300)
         return ("build successful" in out.lower()) or ("success" in out.lower())
 
     def publish_package(self, package_path: str, gas_budget: int = 100_000_000, sender: Optional[str] = None) -> Dict[str, Any]:
