@@ -1,5 +1,3 @@
-import pytest
-
 from fogbed_iota.client.transaction import TransactionBuilder
 
 
@@ -11,9 +9,10 @@ def test_transfer_iota_build_cli_command():
     tx.transfer_iota(recipients, amounts)
     cmd = tx.build_cli_command()
     assert "--split-coins gas '[100,200]'" in cmd
-    assert "--transfer-objects '[result:0]'" in cmd
-    assert "--transfer-objects '[result:1]'" in cmd
-    assert f"--sender {sender}" in cmd
+    assert "--assign coins" in cmd
+    assert "--transfer-objects '[coins.0]'" in cmd
+    assert "--transfer-objects '[coins.1]'" in cmd
+    assert f"--sender @{sender}" in cmd
 
 
 def test_parse_execution_result_success():
@@ -54,6 +53,39 @@ def test_parse_execution_result_success_with_error_word_in_log_line():
     parsed = tb._parse_execution_result(out)
     assert parsed["success"] is True
     assert parsed["digest"] == "ABC999"
+
+
+def test_parse_execution_result_json_success_with_log_prefix():
+    tb = TransactionBuilder("0xS")
+    out = (
+        "2026-03-23T20:05:02.826180Z DEBUG iota::client_commands: Transaction executed\n"
+        "{\n"
+        "  \"digest\": \"5Jd8bKWB3vayghHYcNzkYYmYogc6rZBa4AjLZadNkMMC\",\n"
+        "  \"effects\": {\n"
+        "    \"status\": {\"status\": \"success\", \"error\": null},\n"
+        "    \"gasUsed\": {\"computationCost\": \"1000000\", \"storageCost\": \"1960800\", \"storageRebate\": \"980400\"},\n"
+        "    \"transactionDigest\": \"5Jd8bKWB3vayghHYcNzkYYmYogc6rZBa4AjLZadNkMMC\"\n"
+        "  },\n"
+        "  \"confirmedLocalExecution\": true\n"
+        "}\n"
+    )
+    parsed = tb._parse_execution_result(out)
+    assert parsed["success"] is True
+    assert parsed["digest"] == "5Jd8bKWB3vayghHYcNzkYYmYogc6rZBa4AjLZadNkMMC"
+    assert parsed["gas_used"] == 1980400
+
+
+def test_parse_execution_result_json_failure_with_explicit_error():
+    tb = TransactionBuilder("0xS")
+    out = (
+        "{\n"
+        "  \"error\": \"Cannot find key for address: [0xabc]\",\n"
+        "  \"effects\": {\"status\": {\"status\": \"failure\"}}\n"
+        "}\n"
+    )
+    parsed = tb._parse_execution_result(out)
+    assert parsed["success"] is False
+    assert "Cannot find key" in parsed["error"]
 
 
 def test_parse_dry_run_json_gas_used():
