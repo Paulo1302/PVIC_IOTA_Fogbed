@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from fogbed import FogbedExperiment, Container
 from fogbed_iota import IotaNetwork
 from fogbed_iota.accounts import AccountManager, IotaAccount
-from fogbed_iota.client.transaction import SimpleTransaction, TransactionBuilder
+from fogbed_iota.client.transaction import TransactionBuilder
 from fogbed_iota.client.rpc_client import IotaRpcClient
 from fogbed_iota.utils import get_logger
 from mininet.log import setLogLevel
@@ -60,7 +60,8 @@ def wait_for_network_ready(gateway_ip: str, gateway_rpc_port: int, max_retries: 
             if "result" in result and "error" not in result:
                 print(f"✅ Rede pronta! ({i+1}s)\n")
                 return True
-        except:
+        except (ConnectionError, TimeoutError, OSError, Exception) as e:
+            # Ignora erros de rede/docker durante tentativas de conexão
             pass
 
         print(f"  Tentativa {i+1}/{max_retries}...", end='\r')
@@ -160,7 +161,7 @@ def fund_accounts_via_transfer(client_container, accounts):
             funder_address = "0x05febd29e0f349b6fbfbed1f279481517f162c5653c5c98173cc1aa79d4d2fdd"
 
         # Valor a transferir em MIST (1 bilhão = 1 IOTA)
-        amount_mist = 1_000_000_000  # 1 IOTA
+        amount_mist = 100_000_000  # 100M MIST (0.1 IOTA) - suficiente para múltiplas transações com gas
 
         funded_count = 0
         for i, account in enumerate(accounts):
@@ -236,6 +237,31 @@ def fund_accounts_via_transfer(client_container, accounts):
         return False
 
 
+def check_gas_coins(client_container, address: str, min_amount: int = 0):
+    """
+    Verifica gas coins disponíveis para um endereço usando IotaCLI.get_gas(),
+    que já sabe parsear a saída em texto do `iota client gas`.
+    
+    Retorna lista de dicts: [{"object_id": "0x...", "balance": 123456}, ...]
+    """
+    try:
+        from fogbed_iota.client.cli import IotaCLI
+        cli = IotaCLI(client_container, network="localnet")
+        
+        # Usa get_gas, que retorna lista de dicts: {"object_id": ..., "balance": ...}
+        coins = cli.get_gas(address)
+        
+        # Filtrar coins maiores que min_amount
+        suitable = [c for c in coins if int(c.get("balance", 0)) >= min_amount]
+        return suitable
+        
+    except Exception as e:
+        logger.error(f"Erro ao consultar gas coins: {e}")
+        return []
+        logger.debug(f"Result type: {type(result)}, content: {result}")
+        return []
+
+
 def check_account_balance(client_container, address: str):
     """Consulta saldo de uma conta via RPC"""
     try:
@@ -273,15 +299,50 @@ def check_account_balance(client_container, address: str):
         return 0
 
 
-def execute_transfer(client_container, sender_address: str, recipient_address: str, amount: int):
-    """Executa uma transferência IOTA entre contas"""
-    print(f"\n💸 Transferindo {amount} MIST de {sender_address[:16]}... para {recipient_address[:16]}...")
+def execute_transfer(client_container, sender_address: str, recipient_address: str, amount: int, gas_budget: int = 10_000_000):
+    """Executa uma transferência IOTA entre contas
+    
+    Args:
+        gas_budget: Orçamento de gas em MIST (padrão: 10M MIST = 0.01 IOTA)
+                    Ajuste conforme necessário baseado no custo real das PTBs
+    """
+    print(f"\n💸 Transferindo {amount:,} MIST de {sender_address[:16]}... para {recipient_address[:16]}...")
+    
+    # Verificar saldo do sender antes de tentar
+    sender_balance = check_account_balance(client_container, sender_address)
+    print(f"  💰 Saldo total do sender: {sender_balance:,} MIST")
+    
+    # Verificar gas coins disponíveis
+    gas_coins = check_gas_coins(client_container, sender_address, min_amount=gas_budget)
+    print(f"  ⛽ Gas coins ≥ {gas_budget:,} MIST: {len(gas_coins)}")
+    
+    if len(gas_coins) == 0:
+        print(f"  ❌ ERRO: Nenhuma gas coin com valor ≥ {gas_budget:,} MIST disponível!")
+        print(f"  💡 Sugestão: Reduzir gas_budget ou financiar a conta com mais MIST")
+        
+        # Debug adicional: mostrar TODAS as gas coins disponíveis
+        all_coins = check_gas_coins(client_container, sender_address, min_amount=0)
+        if len(all_coins) > 0:
+            print(f"  🔍 Debug: {len(all_coins)} gas coin(s) encontrada(s) com qualquer valor:")
+            for i, coin in enumerate(all_coins[:5]):  # Limita a 5 para não poluir
+                coin_balance = int(coin.get('balance', 0))
+                print(f"      Coin {i+1}: {coin_balance:,} MIST")
+        else:
+            print(f"  🔍 Debug: Nenhuma gas coin encontrada (conta vazia)")
+        
+        return False
+    
+    # Mostrar a maior gas coin disponível
+    if gas_coins:
+        max_coin = max(gas_coins, key=lambda c: int(c.get('balance', 0)))
+        max_balance = int(max_coin.get('balance', 0))
+        print(f"  🪙  Maior gas coin: {max_balance:,} MIST")
 
     try:
         # Usar TransactionBuilder para criar transação programática
         tx = TransactionBuilder(
             sender=sender_address,
-            gas_budget=10_000_000  # 10M MIST para gas
+            gas_budget=gas_budget  # Gas budget configurável
         )
 
         # Adicionar comando de transferência
@@ -325,19 +386,19 @@ def demo_multiple_transfers(client_container, accounts):
 
     # Simular transferência: Alice -> Bob
     print(f"\n1️⃣  Alice → Bob")
-    execute_transfer(client_container, alice.address, bob.address, 100_000)
+    execute_transfer(client_container, alice.address, bob.address, 50_000_000)  # 50M MIST
 
     time.sleep(2)
 
     # Simular transferência: Bob -> Charlie
     print(f"\n2️⃣  Bob → Charlie")
-    execute_transfer(client_container, bob.address, charlie.address, 50_000)
+    execute_transfer(client_container, bob.address, charlie.address, 20_000_000)  # 20M MIST
 
     time.sleep(2)
 
     # Simular transferência: Charlie -> Alice
     print(f"\n3️⃣  Charlie → Alice")
-    execute_transfer(client_container, charlie.address, alice.address, 25_000)
+    execute_transfer(client_container, charlie.address, alice.address, 5_000_000)  # 5M MIST
 
 
 def print_summary(iota_net, gateway, account_mgr, accounts, client_container):
