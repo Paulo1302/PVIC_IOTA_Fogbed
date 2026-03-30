@@ -634,10 +634,18 @@ active_env: localnet
             return
         logger.info("Setting up smart contract environment")
         try:
+            from fogbed_iota.client.cli import IotaCLI
             from fogbed_iota.accounts import AccountManager
             from fogbed_iota.smart_contracts import SmartContractManager
+            
+            # Create IotaCLI for SmartContractManager to use
+            cli = IotaCLI(self.client_container)
+            
             self.account_manager = AccountManager(self.client_container)
-            self.contract_manager = SmartContractManager(self.client_container, self.account_manager)
+            # Pass IotaCLI to SmartContractManager for proper balance checking
+            self.contract_manager = SmartContractManager(cli, self.account_manager)
+            
+            logger.info("✅ SmartContractManager created with IotaCLI integration")
         except ImportError as e:
             raise RuntimeError(f"Smart contract modules missing: {e}")
         self.client_container.cmd("mkdir -p /contracts /contracts/examples")

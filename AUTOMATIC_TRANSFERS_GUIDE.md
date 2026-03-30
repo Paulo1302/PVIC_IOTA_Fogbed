@@ -42,7 +42,16 @@ Three new files have been created to support automatic transfers:
 ```bash
 cd /home/paulo/Documentos/PVIC_IOTA_Fogbed
 
-# Clean up previous runs
+# ⚠️ SEGURANÇA: Verifique containers antes de remover
+# Liste os containers primeiro:
+docker ps -a --filter "name=mn."
+
+# Remova APENAS se forem containers deste projeto:
+# OPÇÃO 1 (SEGURA): Remova por ID específico
+docker rm -f <container_id>
+
+# OPÇÃO 2 (ARRISCADA): Remove TODOS os containers Mininet
+# Use APENAS se não houver outros projetos Mininet/Fogbed rodando!
 sudo mn -c
 docker rm -f $(docker ps -aq --filter "name=mn.")
 
@@ -351,7 +360,7 @@ Edit `create_test_accounts()` function
 
 | Problem | Solution |
 |---------|----------|
-| Port already in use | `sudo mn -c && docker rm -f $(docker ps -aq --filter "name=mn.")` |
+| Port already in use | ⚠️ **VERIFICAR PRIMEIRO**: `docker ps -a --filter "name=mn."` depois remova apenas containers deste projeto: `docker rm -f <container_id>` e `sudo mn -c` |
 | Docker image not found | `docker build -f docker/Dockerfile.local -t iota-dev:latest .` |
 | Permission denied | Run with `sudo` |
 | Network doesn't respond | Wait longer (up to 30s) or check logs |

@@ -10,11 +10,18 @@ from mininet.log import setLogLevel
 import time
 
 def main():
-    # 🧹 AUTO-LIMPEZA
-    import os
-    os.system("docker rm -f $(docker ps -aq --filter name='mn.') 2>/dev/null")
-    os.system("sudo mn -c 2>/dev/null")
-    print("🧹 Containers antigos removidos\n")
+    # ⚠️ AVISO DE LIMPEZA MANUAL
+    print("=" * 70)
+    print("⚠️  IMPORTANTE: Verifique Containers Anteriores".center(70))
+    print("=" * 70)
+    print("\n🔒 Por segurança, verifique manualmente se há containers anteriores:")
+    print("   docker ps -a --filter 'name=mn.'")
+    print("\nSe houver containers deste projeto, remova manualmente:")
+    print("   docker rm -f <container_id>")
+    print("   sudo mn -c")
+    print("\n" + "=" * 70 + "\n")
+    import time
+    time.sleep(2)
 
     setLogLevel('info')
 

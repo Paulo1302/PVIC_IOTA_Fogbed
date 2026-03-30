@@ -22,7 +22,15 @@ A complete example demonstrating:
 # Navigate to repository
 cd /home/paulo/Documentos/PVIC_IOTA_Fogbed
 
-# Clean up previous runs
+# ⚠️ IMPORTANTE: Verifique containers antes de remover!
+# Liste primeiro para ver o que será removido:
+docker ps -a --filter "name=mn."
+
+# OPÇÃO SEGURA: Remova containers específicos por ID
+docker rm -f <container_id_específico>
+
+# OPÇÃO ARRISCADA: Remove TODOS containers Mininet/Fogbed
+# Use APENAS se não houver outros projetos Fogbed rodando!
 sudo mn -c
 docker rm -f $(docker ps -aq --filter "name=mn.")
 
@@ -290,7 +298,16 @@ tx = TransactionBuilder(sender, gas_budget=50_000_000)  # 50M MIST
 
 ### Error: "Port already in use"
 ```bash
-# Clean up old containers
+# ⚠️ SEGURANÇA: SEMPRE verifique antes de remover!
+# 1. Liste os containers
+docker ps -a --filter "name=mn."
+
+# 2. Identifique quais são deste projeto
+
+# 3. Remova containers específicos (RECOMENDADO)
+docker rm -f <container_id_1> <container_id_2>
+
+# 4. OU remova todos Mininet (apenas se todos forem deste projeto!)
 sudo mn -c
 docker rm -f $(docker ps -aq --filter "name=mn.")
 ```

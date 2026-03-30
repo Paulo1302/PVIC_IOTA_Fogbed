@@ -33,6 +33,10 @@ Emulate complete IOTA blockchain networks with multiple validators and fullnodes
 
 ## 🚀 Quick Start
 
+> **⚠️ SECURITY WARNING**: This project includes a safe cleanup script.
+> Use `./scripts/safe_cleanup.sh` which asks for confirmation before removing containers.
+> NEVER run bulk removal commands without verifying the containers first!
+
 ### 1. Clone the repository
 
 ```bash
@@ -75,7 +79,15 @@ docker build -f docker/Dockerfile.local -t iota-dev:latest .
 ### 5. Run the example
 
 ```bash
-# Clean up any previous run first
+# ⚠️ IMPORTANTE: Verifique containers antes de remover!
+# Liste containers Mininet/Fogbed primeiro:
+docker ps -a --filter "name=mn."
+
+# Se você tem OUTROS PROJETOS usando Mininet/Fogbed, remova APENAS
+# os containers específicos deste projeto usando o ID do container:
+# docker rm -f <container_id_específico>
+
+# APENAS se todos os containers listados forem deste projeto:
 sudo mn -c
 docker rm -f $(docker ps -aq --filter "name=mn.") 2>/dev/null
 
@@ -274,7 +286,29 @@ iota client addresses
 
 ### Issue: Containers already exist
 
+**⚠️ RECOMMENDED: Use the safe cleanup script**
 ```bash
+./scripts/safe_cleanup.sh
+```
+
+This script will:
+- List all Mininet containers
+- Ask for confirmation before removing
+- Prevent accidental deletion of containers from other projects
+
+**Manual cleanup (use with caution):**
+```bash
+# ⚠️ SECURITY WARNING: Always verify BEFORE removing!
+# 1. List containers first:
+docker ps -a --filter "name=mn."
+
+# 2. Verify they are from this project (IOTA/Fogbed)
+
+# 3. SAFE OPTION - Remove specific containers by ID:
+docker rm -f <container_id_1> <container_id_2>
+
+# 4. RISKY OPTION - Removes ALL Mininet/Fogbed containers:
+#    Use ONLY if you DON'T have other Mininet/Fogbed projects running!
 sudo mn -c
 docker rm -f $(docker ps -aq --filter "name=mn.")
 ```

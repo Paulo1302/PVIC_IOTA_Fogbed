@@ -34,12 +34,35 @@ logger = get_logger(__name__)
 
 
 def cleanup_previous_runs():
-    """Remove containers e redes antigas"""
-    print("🧹 Removendo execuções anteriores...")
-    os.system("docker rm -f $(docker ps -aq --filter name='mn.') 2>/dev/null")
-    os.system("sudo -n mn -c 2>/dev/null || true")  # -n: non-interactive, || true: ignore errors
-    time.sleep(1)
-    print("✅ Limpeza concluída\n")
+    """
+    Aviso de limpeza manual necessária.
+    
+    IMPORTANTE: Por questões de segurança, a limpeza de containers
+    anteriores deve ser feita MANUALMENTE pelo usuário.
+    
+    Execute os seguintes comandos APENAS se tiver certeza que são
+    containers deste projeto:
+    
+    1. Listar containers Mininet/Fogbed:
+       docker ps -a --filter "name=mn."
+    
+    2. Se confirmar que são containers deste projeto, remova:
+       docker rm -f $(docker ps -aq --filter "name=mn.")
+       sudo mn -c
+    """
+    print("=" * 70)
+    print("⚠️  AVISO: Limpeza Manual Necessária".center(70))
+    print("=" * 70)
+    print("\n🔒 Por segurança, NÃO fazemos limpeza automática de containers.")
+    print("\n📋 Se houver execuções anteriores deste projeto, execute:")
+    print("   1. Verifique: docker ps -a --filter 'name=mn.'")
+    print("   2. Remova (se confirmar que são deste projeto):")
+    print("      docker rm -f <container_id>  # IDs específicos")
+    print("      sudo mn -c")
+    print("\n" + "=" * 70 + "\n")
+    
+    # Pausa para o usuário ler a mensagem
+    time.sleep(2)
 
 
 def wait_for_network_ready(gateway_ip: str, gateway_rpc_port: int, max_retries: int = 30):

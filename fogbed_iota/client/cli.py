@@ -290,6 +290,19 @@ class IotaCLI:
         return ("build successful" in out.lower()) or ("success" in out.lower())
 
     def publish_package(self, package_path: str, gas_budget: int = 100_000_000, sender: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Publish a Move package to IOTA blockchain.
+        
+        Uses extended timeout (600s) to handle Git dependency updates during publish.
+        
+        Args:
+            package_path: Path to the Move package
+            gas_budget: Gas budget in MIST (default: 100M)
+            sender: Optional sender address (switches active address temporarily)
+            
+        Returns:
+            Dict with package_id, digest, and raw response
+        """
         cmd = f"iota client publish {package_path} --gas-budget {gas_budget} --json"
 
         original = None
@@ -298,7 +311,8 @@ class IotaCLI:
             self.switch_address(sender)
 
         try:
-            out = self._execute(cmd, timeout=180, capture_json=True)
+            # Use extended timeout (600s) for publish - Git dependency updates can be slow
+            out = self._execute(cmd, timeout=600, capture_json=True)
             data: Dict[str, Any] = {}
             if isinstance(out, dict):
                 # Common JSON fields
