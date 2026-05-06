@@ -1,11 +1,1 @@
-# Orquestração da infraestrutura Fog/Fogbed
-fogbed>=1.3.0
-
-# Cliente Docker em Python (Fogbed usa docker-py por baixo)
-docker>=6.0.0
-
-# HTTP para chamadas RPC IOTA
-requests>=2.28.0
-
-# YAML para manipular configs do genesis/validator
-pyyaml>=6.0
+-e .
