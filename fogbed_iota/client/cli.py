@@ -62,8 +62,13 @@ class IotaCLI:
             return False
 
     def _execute(self, command: str, timeout: int = 30, capture_json: bool = False):
+        
         prepared = self._prepare_command(command)
+        # Redireciona stderr para stdout para capturar erros do CLI IOTA
+        if capture_json and "2>&1" not in prepared:
+            prepared = f"{prepared} 2>&1"
         full_cmd = f"timeout {timeout} {prepared}"
+
         try:
             result = self.container.cmd(full_cmd)
 
@@ -72,18 +77,42 @@ class IotaCLI:
 
             # Try to parse JSON output proactively when requested or when output looks like JSON
             if capture_json or result.strip().startswith("{") or result.strip().startswith("["):
+                # Tentar parse direto primeiro
                 try:
                     return json.loads(result)
                 except json.JSONDecodeError:
-                    # Try to extract a JSON object/array from mixed output
-                    m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", result, re.DOTALL)
-                    if m:
-                        try:
-                            return json.loads(m.group(0))
-                        except json.JSONDecodeError:
-                            pass
-                    # Fall back to returning raw result
-                    return result
+                    pass
+
+                # Remover linhas de log/DEBUG antes de tentar parsear
+                clean_lines = [
+                    line for line in result.splitlines()
+                    if not re.match(r'^\d{4}-\d{2}-\d{2}T', line.strip())
+                    and not line.strip().startswith(('[note]', 'FETCHING', 'Cloning',
+                                                    'Updating', 'Compiling', 'INCLUDING'))
+                ]
+                clean = '\n'.join(clean_lines).strip()
+                try:
+                    return json.loads(clean)
+                except json.JSONDecodeError:
+                    pass
+
+                # Usar JSONDecoder incremental para capturar JSON de qualquer profundidade
+                decoder = json.JSONDecoder()
+                # Ordenar posições de '{' pelo maior bloco (rfind do '}')
+                candidates = sorted(
+                    [i for i, c in enumerate(clean) if c == '{'],
+                    key=lambda i: clean.rfind('}', i),
+                    reverse=True
+                )
+                for pos in candidates:
+                    try:
+                        obj, _ = decoder.raw_decode(clean, pos)
+                        return obj
+                    except json.JSONDecodeError:
+                        continue
+
+                # Fallback: retornar string bruta
+                return result
 
             return result
         except Exception as e:
@@ -290,20 +319,7 @@ class IotaCLI:
         return ("build successful" in out.lower()) or ("success" in out.lower())
 
     def publish_package(self, package_path: str, gas_budget: int = 100_000_000, sender: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Publish a Move package to IOTA blockchain.
-        
-        Uses extended timeout (600s) to handle Git dependency updates during publish.
-        
-        Args:
-            package_path: Path to the Move package
-            gas_budget: Gas budget in MIST (default: 100M)
-            sender: Optional sender address (switches active address temporarily)
-            
-        Returns:
-            Dict with package_id, digest, and raw response
-        """
-        cmd = f"iota client publish {package_path} --gas-budget {gas_budget} --json"
+        import subprocess
 
         original = None
         if sender:
@@ -311,31 +327,20 @@ class IotaCLI:
             self.switch_address(sender)
 
         try:
-            # Use extended timeout (600s) for publish - Git dependency updates can be slow
-            out = self._execute(cmd, timeout=600, capture_json=True)
-            data: Dict[str, Any] = {}
-            if isinstance(out, dict):
-                # Common JSON fields
-                if "package_id" in out:
-                    data["package_id"] = out.get("package_id")
-                if "digest" in out:
-                    data["digest"] = out.get("digest")
-                # fallback: look into objectChanges for published packages
-                published = [c for c in out.get("objectChanges", []) if c.get("type") == "published"]
-                if not data.get("package_id") and published:
-                    data["package_id"] = published[0].get("packageId")
-                data["raw"] = out
-                return data
-            else:
-                # fallback to text parsing
-                data = {"raw": out}
-                pm = re.search(r"Package ID:\s*(0x[a-fA-F0-9]+)", out)
-                dm = re.search(r"Transaction Digest:\s*([A-Za-z0-9]+)", out)
-                if pm:
-                    data["package_id"] = pm.group(1)
-                if dm:
-                    data["digest"] = dm.group(1)
-                return data
+            container_name = getattr(self.container, "name", "client")
+            docker_name = f"mn.{container_name}" if not str(container_name).startswith("mn.") else str(container_name)
+
+            shell_cmd = (
+                f"docker exec {docker_name} bash -lc "
+                f"\"iota client publish {package_path} --gas-budget {gas_budget} --json 2>&1\""
+            )
+
+            out = subprocess.check_output(shell_cmd, shell=True, text=True, stderr=subprocess.STDOUT)
+
+            from fogbed_iota.smart_contracts import _extract_json_from_output
+            parsed = _extract_json_from_output(out)
+            return parsed
+
         finally:
             if sender and original:
                 self.switch_address(original)
