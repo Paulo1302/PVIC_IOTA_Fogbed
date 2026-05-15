@@ -1,97 +1,106 @@
-# docker/Dockerfile - IOTA v1.15.0 com suporte Move completo
 FROM ubuntu:24.04 AS downloader
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Ferramentas para download
 RUN apt-get update && \
-    apt-get install -y curl tar && \
+    apt-get install -y --no-install-recommends ca-certificates curl tar && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
 ARG IOTA_VERSION=v1.15.0
 
-# Baixa release oficial da IOTA
 RUN curl -fSL \
       "https://github.com/iotaledger/iota/releases/download/${IOTA_VERSION}/iota-${IOTA_VERSION}-linux-x86_64.tgz" \
-      -o iota.tgz
+      -o /tmp/iota.tgz && \
+    tar -xzf /tmp/iota.tgz && \
+    mkdir -p /out && \
+    find /tmp -type f -name iota -executable -exec cp {} /out/iota \; && \
+    find /tmp -type f -name iota-node -executable -exec cp {} /out/iota-node \;
 
-# Extrai TODOS os binários necessários
-RUN tar -xzf iota.tgz && \
-    mkdir -p /binaries && \
-    find /tmp -type f -name "iota" -executable -exec mv {} /binaries/ \; && \
-    find /tmp -type f -name "iota-node" -executable -exec mv {} /binaries/ \; && \
-    find /tmp -type f -name "iota-move" -executable -exec mv {} /binaries/ \; 2>/dev/null || true
-
-# ============================================
-# Stage final - Imagem runtime com Move tooling
-# ============================================
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 LABEL maintainer="Paulo <paulogrcsilva@gmail.com>"
-LABEL description="IOTA node + Move tooling for Fogbed network emulation"
-LABEL version="1.15.0-move"
+LABEL description="IOTA v1.15.0 runtime image for Fogbed distributed emulation"
+LABEL version="1.15.0"
 
-# Dependências runtime + build tools para Move
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      # Runtime IOTA
+      ca-certificates \
+      curl \
+      bash \
+      iproute2 \
+      iputils-ping \
+      net-tools \
+      jq \
+      procps \
       libssl3 \
       libudev1 \
-      ca-certificates \
-      libpq5 \
-      # Networking
-      iproute2 \
-      net-tools \
-      iputils-ping \
-      curl \
-      wget \
-      jq \
-      # Build tools para Move
-      build-essential \
-      pkg-config \
-      libssl-dev \
-      git \
-    && rm -rf /var/lib/apt/lists/*
+      libgcc-s1 \
+      libstdc++6 && \
+    rm -rf /var/lib/apt/lists/*
 
-# Instalar Rust (necessário para iota move build)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
+COPY --from=downloader /out/iota /usr/local/bin/iota
+COPY --from=downloader /out/iota-node /usr/local/bin/iota-node
 
-# Copia binários compilados
-COPY --from=downloader /binaries/* /usr/local/bin/
+RUN chmod +x /usr/local/bin/iota /usr/local/bin/iota-node && \
+    mkdir -p /iota/config /iota/db /var/lib/iota/mainnetdb /var/log/iota
 
-# Torna executável e verifica
-RUN chmod +x /usr/local/bin/iota* && \
-    iota --version && \
-    iota-node --version && \
-    (iota move --help || echo "iota move integrated into iota binary")
+RUN cat > /usr/local/bin/iota-entrypoint.sh <<'EOF' && chmod +x /usr/local/bin/iota-entrypoint.sh
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Estrutura de diretórios
-RUN mkdir -p \
-    /app/config \
-    /app/db \
-    /app/consensus_db \
-    /custom_config \
-    /root/.iota \
-    /root/.iota/iota.keystore \
-    /var/log/iota \
-    /contracts \
-    /contracts/examples
+CONFIG_DIR="${IOTA_CONFIG_DIR:-/iota/config}"
+VALIDATOR_CONFIG="${IOTA_NODE_CONFIG:-${CONFIG_DIR}/validator.yaml}"
+NETWORK_FILE="${IOTA_NETWORK_FILE:-${CONFIG_DIR}/network.yaml}"
+GENESIS_FILE="${IOTA_GENESIS_FILE:-${CONFIG_DIR}/genesis.blob}"
 
-# Expõe portas comuns
-EXPOSE 9000 9184 8080 8081
+wait_for_config() {
+  echo "[iota-fogbed] waiting for config in ${CONFIG_DIR}"
+  while true; do
+    if [[ -s "${VALIDATOR_CONFIG}" && -s "${NETWORK_FILE}" && -s "${GENESIS_FILE}" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+}
 
-# Variáveis de ambiente
-ENV IOTA_HOME=/app
-ENV IOTA_CONFIG_DIR=/app/config
-ENV RUST_LOG=info,iota=debug
-ENV RUST_BACKTRACE=1
+start_node() {
+  wait_for_config
+  echo "[iota-fogbed] starting iota-node with ${VALIDATOR_CONFIG}"
+  exec /usr/local/bin/iota-node --config-path "${VALIDATOR_CONFIG}"
+}
 
-WORKDIR /app
+case "${1:-wait}" in
+  wait)
+    wait_for_config
+    tail -f /dev/null
+    ;;
+  start-node)
+    shift || true
+    start_node "$@"
+    ;;
+  shell)
+    shift || true
+    exec /bin/bash "$@"
+    ;;
+  *)
+    exec "$@"
+    ;;
+esac
+EOF
 
-# Entrypoint flexível
-ENTRYPOINT []
-CMD ["tail", "-f", "/dev/null"]
+EXPOSE 9000 9002 9184
+EXPOSE 8080/udp
+
+ENV IOTA_CONFIG_DIR=/iota/config \
+    IOTA_DATA_DIR=/var/lib/iota/mainnetdb \
+    IOTA_LOG_DIR=/var/log/iota \
+    RUST_LOG=info \
+    RUST_BACKTRACE=1
+
+WORKDIR /iota
+
+ENTRYPOINT ["/usr/local/bin/iota-entrypoint.sh"]
+CMD ["wait"]
