@@ -79,6 +79,11 @@ def main():
     print("\n⚙️ Configurando e iniciando nós IOTA...")
     print(" (gerando genesis, patcheando configs, subindo processos...)")
     iota_net.start()
+    
+    # DICA: Após o start(), a rede já configura automaticamente os managers!
+    # Você já pode acessar as APIs de contas e contratos nativamente:
+    # acct_mgr = iota_net.account_manager
+    # contract_mgr = iota_net.contract_manager
 
     print(f"\n🌐 RPC Gateway: http://{gateway.ip_addr}:{gateway.rpc_port} ✅")
     print(f"📊 Prometheus Metrics: http://{gateway.ip_addr}:9184/metrics")

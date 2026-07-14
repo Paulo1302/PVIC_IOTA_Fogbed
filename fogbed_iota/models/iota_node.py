@@ -7,10 +7,12 @@ Define estrutura e validação de nós validadores e fullnodes com ports paramet
 e subtipos operacionais alinhados à arquitetura da rede IOTA.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 from enum import Enum
 
+from fogbed import Container
 from fogbed_iota.utils import (
     get_logger,
     validate_port,
@@ -365,6 +367,60 @@ class FullnodeNode:
             "config": self.config.to_dict(),
             "metadata": self.metadata.to_dict(),
         }
+
+
+DEFAULT_IMAGE = os.getenv("IOTA_DOCKER_IMAGE", "iota-dev:latest")
+
+class IotaNode(Container):
+    """Container Fogbed que roda um iota-node."""
+
+    def __init__(
+        self,
+        name: str,
+        ip: str,
+        role: str = "validator",
+        port_offset: int = 0,
+        image: str = DEFAULT_IMAGE,
+        **kwargs
+    ):
+        # We can validate using the existing validate_node_config logic
+        from fogbed_iota.utils import validate_node_config
+        valid, errors = validate_node_config(name, ip, role, port_offset)
+        if not valid:
+            raise ValueError(f"Invalid node config: {errors}")
+
+        self.role = role
+        self.ip_addr = ip
+        self.port_offset = port_offset
+        self.p2p_port = 2001 + (port_offset * 10)
+        self.rpc_port = 9000
+        self.metrics_port = 9184
+
+        env = {
+            "RUST_LOG": "info,iota_node=info",
+            "NODE_TYPE": role,
+        }
+
+        logger.debug(f"Creating IotaNode {name} ({role}) @ {ip}")
+
+        super().__init__(
+            name=name,
+            dimage=image,
+            ip=ip,
+            environment=env,
+            privileged=True,
+            dcmd="tail -f /dev/null",
+            **kwargs
+        )
+
+    def get_config_command(self) -> str:
+        return (
+            "set -e; "
+            "mkdir -p /var/log/iota; "
+            "nohup iota-node --config-path /custom_config/validator.yaml "
+            "> /var/log/iota/iota-node.log 2>&1 & "
+            "echo $! > /var/log/iota/iota-node.pid"
+        )
 
 
 # Factory functions básicas

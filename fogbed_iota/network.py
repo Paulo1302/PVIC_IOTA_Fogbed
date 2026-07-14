@@ -5,8 +5,6 @@ Corrige formato das chaves no gateway config
 
 import os
 import shutil
-import glob
-import re
 import subprocess
 import time
 import json
@@ -16,11 +14,17 @@ import sys
 from typing import List, Optional, TYPE_CHECKING
 
 from fogbed import Container, FogbedExperiment
-from fogbed_iota.utils import get_logger, validate_node_config
+from fogbed_iota.utils import get_logger
+
+# Importando submódulos refatorados
+from fogbed_iota.models.iota_node import IotaNode
+from fogbed_iota.utils.genesis import ensure_iota_binary, generate_genesis
+from fogbed_iota.utils.config import prepare_configs
+from fogbed_iota.utils.lifecycle import inject_and_boot, wait_for_network_ready
 
 if TYPE_CHECKING:
     from fogbed_iota.accounts import AccountManager
-    from fogbed_iota.smart_contracts import SmartContractManager
+    from fogbed_iota.contracts import SmartContractManager
 
 logger = get_logger('network')
 
@@ -28,57 +32,6 @@ WORK_DIR = "/tmp/fogbed_iota_workdir"
 GENESIS_DIR = os.path.join(WORK_DIR, "genesis")
 LIVE_DATA_DIR = os.path.join(WORK_DIR, "live_data")
 DEFAULT_IMAGE = os.getenv("IOTA_DOCKER_IMAGE", "iota-dev:latest")
-MIN_IOTA_VERSION = "1.15.0"
-
-
-class IotaNode(Container):
-    """Container Fogbed que roda um iota-node."""
-
-    def __init__(
-        self,
-        name: str,
-        ip: str,
-        role: str = "validator",
-        port_offset: int = 0,
-        image: str = DEFAULT_IMAGE,
-        **kwargs
-    ):
-        valid, errors = validate_node_config(name, ip, role, port_offset)
-        if not valid:
-            raise ValueError(f"Invalid node config: {errors}")
-
-        self.role = role
-        self.ip_addr = ip
-        self.port_offset = port_offset
-        self.p2p_port = 2001 + (port_offset * 10)
-        self.rpc_port = 9000
-        self.metrics_port = 9184
-
-        env = {
-            "RUST_LOG": "info,iota_node=info",
-            "NODE_TYPE": role,
-        }
-
-        logger.debug(f"Creating IotaNode {name} ({role}) @ {ip}")
-
-        super().__init__(
-            name=name,
-            dimage=image,
-            ip=ip,
-            environment=env,
-            privileged=True,
-            dcmd="tail -f /dev/null",
-            **kwargs
-        )
-
-    def get_config_command(self) -> str:
-        return (
-            "set -e; "
-            "mkdir -p /var/log/iota; "
-            "nohup iota-node --config-path /custom_config/validator.yaml "
-            "> /var/log/iota/iota-node.log 2>&1 & "
-            "echo $! > /var/log/iota/iota-node.pid"
-        )
 
 
 class IotaNetwork:
@@ -193,12 +146,21 @@ class IotaNetwork:
         logger.info("Starting IOTA Network Initialization")
         logger.info("=" * 60)
         self._cleanup()
-        self._generate_genesis()
-        self._prepare_configs()
-        self._inject_and_boot()
-        self._wait_for_network_ready()
+        
+        self._iota_binary_path = ensure_iota_binary(self.image, self._iota_binary_path)
+        
+        validators = [n for n in self.nodes if n.role == "validator"]
+        generate_genesis(validators, GENESIS_DIR, self._iota_binary_path)
+        
+        prepare_configs(self.nodes, GENESIS_DIR, LIVE_DATA_DIR)
+        
+        inject_and_boot(self.nodes, LIVE_DATA_DIR)
+        
+        wait_for_network_ready(self.nodes)
+        
         self._configure_client()
         self._setup_smart_contract_env()
+        
         logger.info("=" * 60)
         logger.info("✅ IOTA Network Successfully Started!")
         logger.info("=" * 60)
@@ -211,378 +173,6 @@ class IotaNetwork:
         os.makedirs(GENESIS_DIR, exist_ok=True)
         os.makedirs(LIVE_DATA_DIR, exist_ok=True)
         logger.info("✅ Work directories ready")
-
-    def _ensure_iota_binary(self) -> str:
-        if self._iota_binary_path:
-            return self._iota_binary_path
-        iota_path = shutil.which("iota")
-        if iota_path and os.access(iota_path, os.X_OK):
-            logger.info(f"✅ Found iota binary in PATH: {iota_path}")
-            self._validate_binary_version(iota_path)
-            self._iota_binary_path = iota_path
-            return iota_path
-        logger.warning("⚠️ iota binary not found in PATH")
-        logger.info(f"Extracting binary from image: {self.image}")
-        temp_bin_dir = "/tmp/fogbed_iota_bin"
-        os.makedirs(temp_bin_dir, exist_ok=True)
-        # Use `docker create` without --rm (not supported) and ensure the created container is removed after copy
-        result = subprocess.run(["docker", "create", self.image], capture_output=True, text=True, check=True)
-        container_id = result.stdout.strip()
-        iota_temp_path = f"{temp_bin_dir}/iota"
-        try:
-            subprocess.run(["docker", "cp", f"{container_id}:/usr/local/bin/iota", iota_temp_path], check=True, capture_output=True)
-        finally:
-            try:
-                subprocess.run(["docker", "rm", "-f", container_id], check=True, capture_output=True)
-            except Exception:
-                logger.debug(f"Failed to remove temporary container: {container_id}")
-        os.chmod(iota_temp_path, 0o755)
-        self._validate_binary_version(iota_temp_path)
-        self._iota_binary_path = iota_temp_path
-        return iota_temp_path
-
-    def _validate_binary_version(self, binary_path: str) -> None:
-        result = subprocess.run([binary_path, "--version"], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Binary test failed: {result.stderr}")
-        version_match = re.search(r"v?(\d+\.\d+\.\d+)", result.stdout)
-        if version_match:
-            version = version_match.group(1)
-            self._iota_version = version
-            logger.info(f"✅ IOTA binary version: {version}")
-            if self._compare_versions(version, MIN_IOTA_VERSION) < 0:
-                raise RuntimeError(f"IOTA version {version} is below minimum required {MIN_IOTA_VERSION}.")
-        else:
-            logger.warning(f"⚠️  Could not parse version from: {result.stdout}")
-
-    def _compare_versions(self, v1: str, v2: str) -> int:
-        parts1 = [int(x) for x in v1.split(".")]
-        parts2 = [int(x) for x in v2.split(".")]
-        for i in range(max(len(parts1), len(parts2))):
-            p1 = parts1[i] if i < len(parts1) else 0
-            p2 = parts2[i] if i < len(parts2) else 0
-            if p1 < p2:
-                return -1
-            elif p1 > p2:
-                return 1
-        return 0
-
-    def _generate_genesis(self) -> None:
-        validators = [n for n in self.nodes if n.role == "validator"]
-        if not validators:
-            raise RuntimeError("At least one validator required for genesis generation")
-        
-        iota_binary = self._ensure_iota_binary()
-        logger.info(f"Generating genesis for {len(validators)} validators")
-
-        # Generate genesis directly with real validator IPs.
-        # This avoids localhost committee addresses that stall consensus at checkpoint 0.
-        benchmark_ips = [v.ip_addr for v in validators]
-        chain_start_ms = str(int(time.time() * 1000))
-        cmd = [
-            iota_binary, "genesis",
-            "--working-dir", GENESIS_DIR,
-            "--force",
-            "--committee-size", str(len(validators)),
-            "--benchmark-ips", *benchmark_ips,
-            "--chain-start-timestamp-ms", chain_start_ms,
-            "--epoch-duration-ms", "86400000",  # 24 horas
-        ]
-        logger.debug(f"Genesis command: {' '.join(cmd)}")
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-
-        genesis_blob = os.path.join(GENESIS_DIR, "genesis.blob")
-        network_yaml = os.path.join(GENESIS_DIR, "network.yaml")
-        if not os.path.exists(genesis_blob):
-            raise RuntimeError(f"Genesis blob not created at {genesis_blob}")
-        if not os.path.exists(network_yaml):
-            raise RuntimeError(f"network.yaml not created at {network_yaml}")
-
-        # Guardrail: fail fast if committee still points to localhost.
-        with open(network_yaml, "r", encoding="utf-8") as f:
-            network_content = f.read()
-        if "/ip4/127.0.0.1/" in network_content:
-            raise RuntimeError(
-                "Generated network.yaml still contains localhost committee addresses; "
-                "consensus will stall. Check genesis --benchmark-ips support."
-            )
-
-        logger.info("✅ Genesis generated successfully with benchmark IPs")
-
-    def _patch_genesis_network_yaml(self, network_yaml: str, validators: List[IotaNode]) -> None:
-        """Substitui IPs 127.0.0.1 no network.yaml pelos IPs reais dos validators."""
-        import yaml as _yaml
-        with open(network_yaml, "r") as f:
-            content = f.read()
-        
-        # Parse YAML
-        try:
-            data = _yaml.safe_load(content)
-        except Exception as e:
-            logger.warning(f"Could not parse network.yaml as YAML: {e}")
-            return
-        
-        validator_configs = data.get("validator_configs", [])
-        if not validator_configs:
-            logger.warning("No validator_configs found in network.yaml")
-            return
-        
-        for i, (cfg, node) in enumerate(zip(validator_configs, validators)):
-            # Substituir network-address (consensus) pelo IP real do validator
-            old_net_addr = cfg.get("network-address", "")
-            if old_net_addr and "127.0.0.1" in old_net_addr:
-                # Manter o mesmo porto, só trocar o IP
-                port_match = re.search(r'/tcp/(\d+)', old_net_addr)
-                port = port_match.group(1) if port_match else "8080"
-                cfg["network-address"] = f"/ip4/{node.ip_addr}/tcp/{port}/http"
-                logger.debug(f"Validator {i}: network-address {old_net_addr} → {cfg['network-address']}")
-            
-            # Substituir p2p-config
-            p2p = cfg.get("p2p-config", {})
-            if p2p:
-                p2p["listen-address"] = f"0.0.0.0:{node.p2p_port}"
-                # Use QUIC transport for UDP addresses to match iota-node expectations
-                p2p["external-address"] = f"/ip4/{node.ip_addr}/udp/{node.p2p_port}/quic"
-        
-        with open(network_yaml, "w") as f:
-            _yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
-        
-        logger.info(f"✅ network.yaml patched for {len(validators)} validators")
-
-
-    def _prepare_configs(self) -> None:
-        logger.info("Preparing YAML configurations")
-        
-        # Busca recursiva para *.yaml e *.yml
-        yaml_files = sorted(glob.glob(os.path.join(GENESIS_DIR, "**", "*.y*ml"), recursive=True))
-        logger.debug(f"Found YAMLs: {[os.path.basename(f) for f in yaml_files]}")
-        
-        # Filtra apenas templates de validator (exclui client/configs)
-        validator_yamls = []
-        for f in yaml_files:
-            base = os.path.basename(f).lower()
-            if any(skip in base for skip in ["client", "iota_config", "fullnode", "network"]):
-                continue
-            validator_yamls.append(f)
-        
-        validators = [n for n in self.nodes if n.role == "validator"]
-        if not validator_yamls:
-            raise RuntimeError(f"No validator templates found in {GENESIS_DIR}. Check genesis generation.")
-        
-        for i, node in enumerate(validators):
-            template = validator_yamls[i % len(validator_yamls)]  # Rodízio seguro
-            logger.debug(f"Using template {os.path.basename(template)} for {node.name}")
-            
-            node_dir = f"{LIVE_DATA_DIR}/{node.name}"
-            os.makedirs(node_dir, exist_ok=True)
-            shutil.copy(f"{GENESIS_DIR}/genesis.blob", f"{node_dir}/genesis.blob")
-            self._patch_validator_yaml(template, f"{node_dir}/validator.yaml", node, validators)
-        
-        # Gateway usa o primeiro validator ou template genérico
-        fullnodes = [n for n in self.nodes if n.role == "fullnode"]
-        if fullnodes:
-            fullnode_yaml = next((f for f in yaml_files if "fullnode" in os.path.basename(f).lower()), validator_yamls[0])
-            gateway = fullnodes[0]
-            gw_dir = f"{LIVE_DATA_DIR}/{gateway.name}"
-            os.makedirs(gw_dir, exist_ok=True)
-            shutil.copy(f"{GENESIS_DIR}/genesis.blob", f"{gw_dir}/genesis.blob")
-            self._create_gateway_config(fullnode_yaml, f"{gw_dir}/validator.yaml", gateway, validators)
-        
-        logger.info("✅ All configurations prepared")
-
-
-    def _patch_validator_yaml(self, source: str, dest: str, node: IotaNode, all_validators: List[IotaNode]) -> None:
-        logger.debug(f"Patching validator YAML: {source} → {dest}")
-        with open(source, "r") as f:
-            lines = f.readlines()
-        new_lines: List[str] = []
-        for line in lines:
-            if "db-path:" in line:
-                indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f'{indent}db-path: "/app/db"\n')
-            elif "genesis-file-location:" in line:
-                indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f'{indent}genesis-file-location: "/custom_config/genesis.blob"\n')
-            elif "network-address:" in line:
-                indent = " " * (len(line) - len(line.lstrip()))
-                # Preserve the port from the genesis template (2000, 2010, 2020, 2030)
-                # so the quorum driver can find validators at the addresses in genesis.blob
-                port_match = re.search(r'/tcp/(\d+)', line)
-                if port_match:
-                    net_port = port_match.group(1)
-                else:
-                    net_port = str(2000 + all_validators.index(node) * 10)
-                new_lines.append(f"{indent}network-address: /ip4/0.0.0.0/tcp/{net_port}/http\n")
-            elif "metrics-address:" in line:
-                indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f'{indent}metrics-address: "0.0.0.0:9184"\n')
-
-            elif "listen-address:" in line and "p2p" not in line.lower():
-                indent = " " * (len(line) - len(line.lstrip()))
-                new_lines.append(f'{indent}listen-address: "0.0.0.0:{node.p2p_port}"\n')
-            elif "external-address:" in line:
-                indent = " " * (len(line) - len(line.lstrip()))
-                # Ensure QUIC transport is appended so multiaddrs are valid for iota-node
-                new_lines.append(f'{indent}external-address: /ip4/{node.ip_addr}/udp/{node.p2p_port}/quic\n')
-            elif any(k in line for k in ["pruning-period", "num-epochs-to-retain"]):
-                continue
-            else:
-                new_lines.append(line)
-        with open(dest, "w") as f:
-            f.writelines(new_lines)
-        logger.debug(f"✅ Validator YAML patched for {node.name}")
-
-    def _extract_peer_ids(self, validator_yamls: List[str]) -> List[str]:
-        """Extrai peer-ids dos YAMLs do genesis lendo o network-key-pair ou fullnode.yaml."""
-        peer_ids = []
-        fullnode_yaml = os.path.join(GENESIS_DIR, "fullnode.yaml")
-        if os.path.exists(fullnode_yaml):
-            with open(fullnode_yaml, "r") as f:
-                content = f.read()
-            # Extrai peer-ids na ordem que aparecem no fullnode.yaml seed-peers
-            matches = re.findall(r'peer-id:\s*([a-f0-9]{64})', content)
-            if matches:
-                logger.debug(f"Extracted {len(matches)} peer-ids from fullnode.yaml")
-                return matches
-        logger.warning("⚠️  Could not extract peer-ids from fullnode.yaml, seed-peers will lack peer-id")
-        return []
-
-    def _create_gateway_config(
-        self,
-        source: str,
-        dest: str,
-        gateway: IotaNode,
-        validators: List[IotaNode],
-    ) -> None:
-        """Gera YAML válido para o gateway (fullnode) com UDP e peer-ids corretos."""
-        logger.debug(f"Creating gateway(fullnode) config: {dest}")
-
-        # Extrair peer-ids do genesis
-        yaml_files = sorted(glob.glob(os.path.join(GENESIS_DIR, "*.yaml")))
-        validator_yamls = [f for f in yaml_files if os.path.basename(f).lower() not in
-                           ["client.yaml", "fullnode.yaml", "network.yaml"]]
-        peer_ids = self._extract_peer_ids(validator_yamls)
-
-        lines = [
-            "---",
-            'db-path: "/app/db"',
-            "network-address: /ip4/0.0.0.0/tcp/8080/http",
-            'metrics-address: "0.0.0.0:9184"',
-            "",
-            'json-rpc-address: "0.0.0.0:9000"',
-            "",
-            "genesis:",
-            '  genesis-file-location: "/custom_config/genesis.blob"',
-            "",
-            "p2p-config:",
-            f'  listen-address: "0.0.0.0:{gateway.p2p_port}"',
-            f"  external-address: /ip4/{gateway.ip_addr}/udp/{gateway.p2p_port}/quic",
-            "  seed-peers:",
-        ]
-
-        for i, v in enumerate(validators):
-            if i < len(peer_ids):
-                lines.append(f"    - peer-id: {peer_ids[i]}")
-                lines.append(f"      address: /ip4/{v.ip_addr}/udp/{v.p2p_port}/quic")
-            else:
-                lines.append(f"    - address: /ip4/{v.ip_addr}/udp/{v.p2p_port}/quic")
-
-        with open(dest, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-
-        logger.debug("✅ Gateway(fullnode) config created with UDP peer addresses")
-
-    def _inject_and_boot(self) -> None:
-        logger.info("Injecting configs and booting nodes")
-        validators = [n for n in self.nodes if n.role == "validator"]
-        fullnodes = [n for n in self.nodes if n.role == "fullnode"]
-        logger.info(f"Starting {len(validators)} validators sequentially...")
-        for i, node in enumerate(validators):
-            self._inject_and_start_node(node)
-            if i < len(validators) - 1:
-                logger.debug(f"Waiting 8s before starting next validator...")
-                time.sleep(8)
-        if validators:
-            logger.info("Waiting 15s for validator network to stabilize...")
-            time.sleep(15)
-        logger.info(f"Starting {len(fullnodes)} fullnodes...")
-        for node in fullnodes:
-            self._inject_and_start_node(node)
-            self._wait_port_open(node, 9000, timeout=90)
-        logger.info("✅ All nodes booted successfully")
-
-    def _inject_and_start_node(self, node: IotaNode) -> None:
-        src_dir = f"{LIVE_DATA_DIR}/{node.name}"
-        if not os.path.exists(src_dir):
-            raise RuntimeError(f"Config directory missing for {node.name}: {src_dir}")
-        logger.info(f"Booting node: {node.name} (role={node.role}, ip={node.ip_addr})")
-        node.cmd("mkdir -p /custom_config")
-        cmd = f"docker cp {src_dir}/. mn.{node.name}:/custom_config/"
-        rc = os.system(cmd)
-        if rc != 0:
-            raise RuntimeError(f"docker cp failed for {node.name} (exit code {rc})")
-        logger.debug(f"Successfully copied {src_dir} to mn.{node.name}:/custom_config/")
-        node.cmd("sh -lc 'ls -la /custom_config && echo --- && head -n 80 /custom_config/validator.yaml'")
-        self._debug_runtime_ip(node)
-        time.sleep(1)
-        node.cmd(node.get_config_command())
-        self._wait_node_process(node, timeout=30)
-
-    def _wait_node_process(self, node: IotaNode, timeout: int = 30) -> None:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            out = node.cmd("sh -lc 'test -f /var/log/iota/iota-node.pid && ps -p $(cat /var/log/iota/iota-node.pid) >/dev/null 2>&1 && echo OK || echo NOK'")
-            if "OK" in out:
-                logger.debug(f"✅ Process started on {node.name}")
-                return
-            time.sleep(1)
-        tail = node.cmd("sh -lc 'tail -n 200 /var/log/iota/iota-node.log 2>/dev/null || true'")
-        raise RuntimeError(f"iota-node failed to start on {node.name}. Last log:\n{tail}")
-
-    def _wait_port_open(self, node: IotaNode, port: int, timeout: int = 90) -> None:
-        deadline = time.time() + timeout
-        check_tool = node.cmd("command -v ss >/dev/null 2>&1 && echo ss || echo netstat").strip()
-        if check_tool == "ss":
-            check_cmd = f"ss -lnt | grep -q ':{port}'"
-        else:
-            check_cmd = f"netstat -lnt | grep -q ':{port}'"
-        logger.debug(f"Waiting for port {port} on {node.name} using {check_tool}")
-        while time.time() < deadline:
-            out = node.cmd(f"sh -lc '{check_cmd} && echo OK || echo NOK'")
-            if "OK" in out:
-                logger.debug(f"✅ Port {port} open on {node.name}")
-                return
-            time.sleep(2)
-        tail = node.cmd("sh -lc 'tail -n 220 /var/log/iota/iota-node.log 2>/dev/null || true'")
-        raise RuntimeError(f"Port {port} did not open on {node.name} within {timeout}s. Last log:\n{tail}")
-
-    def _debug_runtime_ip(self, node: IotaNode) -> None:
-        out = node.cmd("sh -lc \"ip -4 addr show | grep -oE '10\\.0\\.0\\.[0-9]+' | head -n1 || true\"").strip()
-        logger.debug(f"Node {node.name} (role={node.role}, expected_ip={node.ip_addr}, runtime_ip={out})")
-
-    def _wait_for_network_ready(self, timeout: int = 90) -> None:
-        logger.info("Waiting for network consensus...")
-        gateway = next((n for n in self.nodes if n.role == "fullnode"), None)
-        if not gateway:
-            logger.warning("No gateway found, skipping RPC health check")
-            return
-        deadline = time.time() + timeout
-        rpc_url = f"http://{gateway.ip_addr}:{gateway.rpc_port}"
-        while time.time() < deadline:
-            try:
-                result = gateway.cmd(f'curl -s -X POST {rpc_url} -H "Content-Type: application/json" -d \'{{' + '"jsonrpc":"2.0","method":"iota_getTotalTransactionBlocks","params":[],"id":1}}\' 2>/dev/null || echo FAIL')
-                if "FAIL" not in result and "error" not in result.lower():
-                    try:
-                        data = json.loads(result)
-                        if "result" in data:
-                            logger.info(f"✅ RPC responding: {data}")
-                            return
-                    except json.JSONDecodeError:
-                        pass
-            except Exception as e:
-                logger.debug(f"RPC check failed: {e}")
-            time.sleep(3)
-        logger.warning(f"⚠️ RPC did not respond within {timeout}s, proceeding anyway...")
 
     def _configure_client(self) -> None:
         if not self.client_container:
@@ -636,13 +226,10 @@ active_env: localnet
         try:
             from fogbed_iota.client.cli import IotaCLI
             from fogbed_iota.accounts import AccountManager
-            from fogbed_iota.smart_contracts import SmartContractManager
+            from fogbed_iota.contracts import SmartContractManager
             
-            # Create IotaCLI for SmartContractManager to use
             cli = IotaCLI(self.client_container)
-            
             self.account_manager = AccountManager(self.client_container)
-            # Pass IotaCLI to SmartContractManager for proper balance checking
             self.contract_manager = SmartContractManager(cli, self.account_manager)
             
             logger.info("✅ SmartContractManager created with IotaCLI integration")

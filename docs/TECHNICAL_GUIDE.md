@@ -498,10 +498,10 @@ def execute_with_retry(tx, client, max_retries=3):
 | File | Purpose |
 |------|---------|
 | `fogbed_iota/client/transaction.py` | TransactionBuilder implementation |
-| `fogbed_iota/accounts.py` | AccountManager implementation |
+| `fogbed_iota/accounts/` | AccountManager implementation |
+| `fogbed_iota/contracts/` | SmartContractManager implementation |
 | `fogbed_iota/client/rpc_client.py` | RPC client implementation |
 | `fogbed_iota/network.py` | IotaNetwork orchestration |
-| `fogbed_iota/crypto/keypair.py` | Cryptographic utilities |
 
 ## 🔗 References
 

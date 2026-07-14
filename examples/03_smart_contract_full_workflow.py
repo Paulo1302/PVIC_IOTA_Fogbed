@@ -765,6 +765,8 @@ def main() -> None:
 
         print_step(7, "Deploy Smart Contract")
         print("Publicando com Alice (alias registrado e financiado)...")
+        # DICA: O SmartContractManager lida internamente com toda a abstração de
+        # ler o JSON de output, extrair o Package ID, os Módulos e o Upgrade Cap!
         package = contract_mgr.publish_package(
             package_path=PACKAGE_CONTAINER_DIR,
             sender_alias="alice",

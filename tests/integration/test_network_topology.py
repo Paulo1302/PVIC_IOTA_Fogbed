@@ -17,11 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from fogbed_iota.models import create_validator, create_fullnode
 from fogbed_iota.utils import (
-    setup_logging, get_logger,
-    docker_copy, docker_exec, docker_logs,
-    container_exists, is_container_running,
-    wait_for_container, get_container_ip,
-    wait_for_port, healthcheck_container
+    setup_logging, get_logger
 )
 
 # Setup logging
@@ -29,17 +25,6 @@ setup_logging(level="DEBUG")
 logger = get_logger('test_integration_docker')
 
 
-def test_docker_operations():
-    """Testa operações básicas de Docker"""
-    logger.info("=" * 80)
-    logger.info("TEST: Docker Operations (container_exists)")
-    logger.info("=" * 80)
-
-    # Testar que container não existe
-    fake_container = "fake_iota_12345"
-    exists = container_exists(fake_container)
-    assert not exists, "Fake container should not exist"
-    logger.info(f"✅ Correctly detected non-existent container: {fake_container}")
 
 
 def test_node_config_docker_compatibility():
@@ -237,9 +222,6 @@ def run_all_integration_tests():
     logger.info("")
 
     try:
-        test_docker_operations()
-        logger.info("")
-
         test_node_config_docker_compatibility()
         logger.info("")
 

@@ -17,7 +17,9 @@ def main():
     # Criar experimento Fogbed
     exp = FogbedExperiment()
     
-    # Usar context manager para garantir cleanup
+    # O uso do context manager (with ...) garante que a rede será parada
+    # adequadamente e o workdir (/tmp/fogbed_iota_workdir) será limpo,
+    # mesmo que o script sofra um erro (ex: interrupção do usuário via CTRL+C).
     with IotaNetwork(exp, image="iota-dev:latest", auto_cleanup=True) as iota_net:
         
         # Configurar rede

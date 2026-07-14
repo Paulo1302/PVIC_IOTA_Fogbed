@@ -139,13 +139,14 @@ def _create_managed_account(cli, account_mgr: AccountManager, alias: str) -> Iot
     return account
 
 
-def create_test_accounts(client_container):
+def create_test_accounts(iota_net, client_container):
     """Cria contas de teste para demonstração"""
     print("👥 Gerando contas de teste...\n")
 
-    account_mgr = AccountManager(client_container)
-    from fogbed_iota.client.cli import IotaCLI
-    cli = IotaCLI(client_container, network="localnet")
+    # DICA: A nova IotaNetwork já cria e anexa um AccountManager automaticamente
+    # Não precisamos mais instanciar manualmente AccountManager(client_container)
+    account_mgr = iota_net.account_manager
+    cli = account_mgr.cli
 
     # Alice deve existir no keystore atual para assinar sempre
     alice_addr = cli.get_active_address()
@@ -170,13 +171,12 @@ def create_test_accounts(client_container):
     return account_mgr, [alice, bob, charlie]
 
 
-def fund_accounts_via_transfer(client_container, accounts):
+def fund_accounts_via_transfer(iota_net, client_container, accounts):
     """Financia contas via transfer da conta pré-existente com fundos de genesis"""
     print("💰 Financiando contas via transfer de conta pré-existente...\n")
 
     try:
-        from fogbed_iota.client.cli import IotaCLI
-        cli = IotaCLI(client_container, network="localnet")
+        cli = iota_net.account_manager.cli
 
         # Obter endereço do funder (ativo/primeiro com fundos)
         funder_address = cli.get_active_address()
@@ -260,7 +260,7 @@ def fund_accounts_via_transfer(client_container, accounts):
         return False
 
 
-def check_gas_coins(client_container, address: str, min_amount: int = 0):
+def check_gas_coins(iota_net, address: str, min_amount: int = 0):
     """
     Verifica gas coins disponíveis para um endereço usando IotaCLI.get_gas(),
     que já sabe parsear a saída em texto do `iota client gas`.
@@ -268,8 +268,7 @@ def check_gas_coins(client_container, address: str, min_amount: int = 0):
     Retorna lista de dicts: [{"object_id": "0x...", "balance": 123456}, ...]
     """
     try:
-        from fogbed_iota.client.cli import IotaCLI
-        cli = IotaCLI(client_container, network="localnet")
+        cli = iota_net.account_manager.cli
         
         # Usa get_gas, que retorna lista de dicts: {"object_id": ..., "balance": ...}
         coins = cli.get_gas(address)
@@ -322,7 +321,7 @@ def check_account_balance(client_container, address: str):
         return 0
 
 
-def execute_transfer(client_container, sender_address: str, recipient_address: str, amount: int, gas_budget: int = 10_000_000):
+def execute_transfer(iota_net, client_container, sender_address: str, recipient_address: str, amount: int, gas_budget: int = 10_000_000):
     """Executa uma transferência IOTA entre contas
     
     Args:
@@ -336,7 +335,7 @@ def execute_transfer(client_container, sender_address: str, recipient_address: s
     print(f"  💰 Saldo total do sender: {sender_balance:,} MIST")
     
     # Verificar gas coins disponíveis
-    gas_coins = check_gas_coins(client_container, sender_address, min_amount=gas_budget)
+    gas_coins = check_gas_coins(iota_net, sender_address, min_amount=gas_budget)
     print(f"  ⛽ Gas coins ≥ {gas_budget:,} MIST: {len(gas_coins)}")
     
     if len(gas_coins) == 0:
@@ -344,7 +343,7 @@ def execute_transfer(client_container, sender_address: str, recipient_address: s
         print(f"  💡 Sugestão: Reduzir gas_budget ou financiar a conta com mais MIST")
         
         # Debug adicional: mostrar TODAS as gas coins disponíveis
-        all_coins = check_gas_coins(client_container, sender_address, min_amount=0)
+        all_coins = check_gas_coins(iota_net, sender_address, min_amount=0)
         if len(all_coins) > 0:
             print(f"  🔍 Debug: {len(all_coins)} gas coin(s) encontrada(s) com qualquer valor:")
             for i, coin in enumerate(all_coins[:5]):  # Limita a 5 para não poluir
@@ -399,7 +398,7 @@ def execute_transfer(client_container, sender_address: str, recipient_address: s
         return False
 
 
-def demo_multiple_transfers(client_container, accounts):
+def demo_multiple_transfers(iota_net, client_container, accounts):
     """Demonstra múltiplas transferências em cadeia"""
     print("\n" + "="*60)
     print("🔄 DEMONSTRAÇÃO: Transferências em Cadeia")
@@ -409,19 +408,19 @@ def demo_multiple_transfers(client_container, accounts):
 
     # Simular transferência: Alice -> Bob
     print(f"\n1️⃣  Alice → Bob")
-    execute_transfer(client_container, alice.address, bob.address, 50_000_000)  # 50M MIST
+    execute_transfer(iota_net, client_container, alice.address, bob.address, 50_000_000)  # 50M MIST
 
     time.sleep(2)
 
     # Simular transferência: Bob -> Charlie
     print(f"\n2️⃣  Bob → Charlie")
-    execute_transfer(client_container, bob.address, charlie.address, 20_000_000)  # 20M MIST
+    execute_transfer(iota_net, client_container, bob.address, charlie.address, 20_000_000)  # 20M MIST
 
     time.sleep(2)
 
     # Simular transferência: Charlie -> Alice
     print(f"\n3️⃣  Charlie → Alice")
-    execute_transfer(client_container, charlie.address, alice.address, 5_000_000)  # 5M MIST
+    execute_transfer(iota_net, client_container, charlie.address, alice.address, 5_000_000)  # 5M MIST
 
 
 def print_summary(iota_net, gateway, account_mgr, accounts, client_container):
@@ -543,11 +542,11 @@ def main():
 
     # ============== CRIAR CONTAS ==============
     print("✅ Rede IOTA operacional!\n")
-    account_mgr, accounts = create_test_accounts(client)
+    account_mgr, accounts = create_test_accounts(iota_net, client)
 
     # ============== FINANCIAR CONTAS ==============
     print("💰 Etapa de Funding...")
-    fund_accounts_via_transfer(client, accounts)
+    fund_accounts_via_transfer(iota_net, client, accounts)
 
     # Aguardar confirmação
     print("⏳ Aguardando confirmação de fundos (10 segundos)...")
@@ -555,7 +554,7 @@ def main():
 
     # ============== FAZER TRANSFERÊNCIAS ==============
     print("💸 Iniciando demonstração de transferências programáticas...\n")
-    demo_multiple_transfers(client, accounts)
+    demo_multiple_transfers(iota_net, client, accounts)
 
     # ============== RESUMO ==============
     print_summary(iota_net, gateway, account_mgr, accounts, client)

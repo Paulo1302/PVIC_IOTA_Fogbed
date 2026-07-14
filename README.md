@@ -246,8 +246,8 @@ curl http://10.0.0.100:9184/metrics
 ### Run Automated Tests
 
 ```bash
-chmod +x scripts/test_network.sh
-sudo ./scripts/test_network.sh
+chmod +x scripts/run_tests.sh
+sudo ./scripts/run_tests.sh
 ```
 
 ## 📊 Monitoring
@@ -370,7 +370,10 @@ fogbed-iota/
 ├── fogbed_iota/           # Main Python package
 │   ├── __init__.py        # Package initialization
 │   ├── __version__.py     # Version information
-│   └── network.py         # Core IotaNetwork orchestrator
+│   ├── network.py         # Core IotaNetwork (Facade)
+│   ├── accounts/          # AccountManager e ferramentas de wallet
+│   ├── contracts/         # SmartContractManager e utilitários Move
+│   └── models/            # Classes base (IotaNode, IotaAccount)
 ├── docker/                # Docker configurations
 │   ├── Dockerfile         # Production image (downloads binaries, requires internet)
 │   ├── Dockerfile.local   # Build from local binaries in docker/bins/ (offline)
@@ -380,7 +383,7 @@ fogbed-iota/
 │   └── 02_complete_network.py   # Advanced example with client
 ├── scripts/               # Utility scripts
 │   ├── build_docker.sh          # Build Docker images
-│   ├── test_network.sh          # Automated tests
+│   ├── run_tests.sh             # Automated tests
 │   └── install_iota_host.sh     # Install binary to host
 ├── tests/                 # Unit and integration tests
 ├── docs/                  # Documentation

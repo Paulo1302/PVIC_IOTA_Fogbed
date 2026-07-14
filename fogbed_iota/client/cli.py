@@ -337,8 +337,8 @@ class IotaCLI:
 
             out = subprocess.check_output(shell_cmd, shell=True, text=True, stderr=subprocess.STDOUT)
 
-            from fogbed_iota.smart_contracts import _extract_json_from_output
-            parsed = _extract_json_from_output(out)
+            from fogbed_iota.utils.parser import extract_json_from_output
+            parsed = extract_json_from_output(out)
             return parsed
 
         finally:

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🏗️ Architecture - 2026-07-14
+
+**MAJOR REFACTOR: Modularization of the core library**
+
+#### Changed
+- **`fogbed_iota.network`**: Stripped out account and smart contract logic, reducing complexity. Now acts purely as a Facade and network orchestrator.
+- **Examples**: Updated all examples (`01` to `04`) to utilize the new built-in managers (`iota_net.account_manager` and `iota_net.contract_manager`), removing redundant boilerplate code.
+- **Documentation**: Updated `README.md` and `TECHNICAL_GUIDE.md` directory trees to reflect the new structure.
+
+#### Added
+- **`fogbed_iota.accounts`**: New dedicated module containing `AccountManager`.
+- **`fogbed_iota.contracts`**: New dedicated module containing `SmartContractManager`.
+- **`tests/unit/`**: Comprehensive suite of unit tests isolated via mocks (`test_accounts.py`, `test_contracts.py`, `test_network_facade.py`).
+
 ### 🔒 Security - 2026-03-30
 
 **CRITICAL FIX: Removed automatic container deletion that could affect other projects**
