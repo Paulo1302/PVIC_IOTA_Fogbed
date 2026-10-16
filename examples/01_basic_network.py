@@ -9,7 +9,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fogbed import FogbedExperiment, Container
-from fogbed_iota import IotaNetwork
+from fogbed_iota.network import IotaNetwork
 
 def main():
     print("=== Rede IOTA com Cleanup Automático ===\n")
@@ -43,11 +43,20 @@ def main():
         iota_net.start()
         
         print("\n✅ Rede pronta!")
-        print(f"RPC: {iota_net.get_rpc_url()}")
-        print(f"Metrics: {iota_net.get_metrics_url()}")
+        print(f"🌐 Acesso via Host / Navegador:")
+        print(f"   RPC:     {iota_net.get_rpc_url(host=True)}  (JSON-RPC 2.0 / WebSocket via POST)")
+        print(f"   Metrics: {iota_net.get_metrics_url(host=True)}  (Abre no navegador)")
+        print(f"\n📦 Acesso interno Fogbed (outros containers):")
+        print(f"   RPC:     {iota_net.get_rpc_url(host=False)}")
+        print(f"   Metrics: {iota_net.get_metrics_url(host=False)}")
         
         # Fazer testes interativos
-        print("\n💡 Comandos úteis:")
+        print("\n💡 Comandos úteis para testar:")
+        print("  # 1. No seu terminal Host:")
+        print("  curl -X POST http://localhost:9000 -H 'Content-Type: application/json' \\")
+        print("    -d '{\"jsonrpc\":\"2.0\",\"method\":\"iota_getChainIdentifier\",\"params\":[],\"id\":1}'")
+        print("  curl -s http://localhost:9184/metrics | head -n 15")
+        print("\n  # 2. De dentro do container cliente (mn.client):")
         print("  docker exec -it mn.client bash")
         print("  curl -X POST http://10.0.0.5:9000 -H 'Content-Type: application/json' \\")
         print("    -d '{\"jsonrpc\":\"2.0\",\"method\":\"iota_getChainIdentifier\",\"params\":[],\"id\":1}'")

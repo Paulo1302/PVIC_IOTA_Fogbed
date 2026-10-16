@@ -1,64 +1,110 @@
-# docker/Dockerfile.local - Constrói usando binário local (sem download do GitHub)
-# Uso: docker build -f docker/Dockerfile.local -t iota-dev:latest .
-# Pré-requisito: colocar iota e iota-node em docker/bins/ antes de buildar
+# docker/Dockerfile.local - IOTA v1.33.1 runtime image for Fogbed (offline / reproducible)
+#
+# Builds `iota-dev:latest` from the pinned v1.33.1 binaries in docker/bins/. Nothing is
+# downloaded from the internet for IOTA itself during this build (apt packages only).
+#
+# Prerequisite (once):   ./docker/fetch_binaries.sh        # pinned + sha256-verified release asset
+#                  or:   ./docker/build_from_source.sh     # reproducible build from the v1.33.1 tag
+# Build:                 docker build -f docker/Dockerfile.local -t iota-dev:latest .
+#
+# Pins live in fogbed_iota/genesis/IOTA_RELEASE.json; the build FAILS if a binary's sha256
+# or `--version` differs from it, so a stale / mixed-version docker/bins/ cannot be baked in.
 
-FROM ubuntu:24.04
+ARG UBUNTU_TAG=24.04
+FROM ubuntu:${UBUNTU_TAG}
+
+ARG IOTA_VERSION=v1.33.1
+ARG IOTA_COMMIT=97b1057f8de0ff220a1d0478b78a384cb484b0ef
+ARG IOTA_VERSION_STRING=1.33.1-97b1057f8de0
+ARG IOTA_PROTOCOL_VERSION=37
+# Set to false ONLY for binaries produced by docker/build_from_source.sh (not bit-identical).
+ARG VERIFY_SHA256=true
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-LABEL maintainer="Paulo <paulogrcsilva@gmail.com>"
-LABEL description="IOTA node + Move tooling for Fogbed network emulation"
-LABEL version="1.15.0-local"
+LABEL maintainer="Paulo <paulogrcsilva@gmail.com>" \
+      description="IOTA ${IOTA_VERSION} (Starfish BFT, Move VM) node + genesis tooling for Fogbed network emulation" \
+      org.opencontainers.image.title="iota-dev" \
+      org.opencontainers.image.version="${IOTA_VERSION}" \
+      org.opencontainers.image.revision="${IOTA_COMMIT}" \
+      org.opencontainers.image.source="https://github.com/iotaledger/iota" \
+      io.iota.protocol-version="${IOTA_PROTOCOL_VERSION}" \
+      io.iota.binary-version="${IOTA_VERSION_STRING}" \
+      io.iota.target="linux/x86_64"
 
+# Runtime-only dependencies, derived from `ldd` of the v1.33.1 binaries:
+#   iota-node      -> libstdc++6, libgcc-s1 (in base image)
+#   iota           -> libudev1, libcap2
+#   iota-localnet  -> libpq5 (+ libssl3 via libpq5)
+# git: `iota move build` resolves Move dependencies via git. jq/curl/iproute2/iputils/procps:
+# entrypoint, healthcheck and P2P/RPC diagnostics. No compiler / Rust toolchain is needed.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      libssl3 \
-      libudev1 \
       ca-certificates \
+      libstdc++6 \
+      libgcc-s1 \
+      libudev1 \
+      libcap2 \
       libpq5 \
-      iproute2 \
-      net-tools \
-      iputils-ping \
-      curl \
-      wget \
-      jq \
-      build-essential \
-      pkg-config \
-      libssl-dev \
+      libssl3 \
       git \
+      curl \
+      jq \
+      bash \
+      iproute2 \
+      iputils-ping \
+      net-tools \
+      procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Rust (necessário para iota move build)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
+# Pinned binaries, owned by root and executable. `iota-localnet` hosts `genesis` in v1.33.1.
+COPY --chown=root:root --chmod=0755 docker/bins/iota          /usr/local/bin/iota
+COPY --chown=root:root --chmod=0755 docker/bins/iota-node     /usr/local/bin/iota-node
+COPY --chown=root:root --chmod=0755 docker/bins/iota-localnet /usr/local/bin/iota-localnet
+COPY --chown=root:root --chmod=0644 fogbed_iota/genesis/IOTA_RELEASE.json /opt/iota/IOTA_RELEASE.json
+COPY --chown=root:root --chmod=0755 docker/iota-entrypoint.sh /usr/local/bin/iota-entrypoint.sh
 
-# Copia binários do diretório local docker/bins/
-COPY docker/bins/iota /usr/local/bin/iota
-COPY docker/bins/iota-node /usr/local/bin/iota-node
+# Build-time provenance gate: checksums + versions must match the pinned manifest.
+RUN set -eu; \
+    if [ "${VERIFY_SHA256}" = "true" ]; then \
+      jq -r '.binaries | to_entries[] | "\(.value)  /usr/local/bin/\(.key)"' /opt/iota/IOTA_RELEASE.json | sha256sum -c -; \
+    else echo "WARNING: sha256 verification disabled (source build)"; fi; \
+    test "$(jq -r .release_tag /opt/iota/IOTA_RELEASE.json)" = "${IOTA_VERSION}"; \
+    test "$(jq -r .version_string /opt/iota/IOTA_RELEASE.json)" = "${IOTA_VERSION_STRING}"; \
+    for b in iota iota-node iota-localnet; do \
+      v="$("$b" --version | awk '{print $NF}')"; \
+      echo "$b => $v"; \
+      test "$v" = "${IOTA_VERSION_STRING}"; \
+    done
 
-RUN chmod +x /usr/local/bin/iota /usr/local/bin/iota-node && \
-    iota --version && \
-    iota-node --version
-
+# /iota/*          : node runtime layout (config is injected/mounted at /iota/config)
+# /app, /contracts : layout used by the existing Fogbed client / smart-contract workflow
+# NOTE: /root/.iota/iota.keystore is intentionally NOT pre-created as a directory (the
+# v1.33.1 CLI expects the keystore to be a file it creates itself).
 RUN mkdir -p \
-    /app/config \
-    /app/db \
-    /app/consensus_db \
-    /custom_config \
-    /root/.iota \
-    /root/.iota/iota.keystore \
-    /var/log/iota \
-    /contracts \
-    /contracts/examples
+      /iota/config /iota/db /var/log/iota \
+      /app/config /app/db /app/consensus_db \
+      /custom_config /root/.iota \
+      /contracts /contracts/examples
 
-EXPOSE 9000 9184 8080 8081
+# Ports (validator / fullnode defaults used by the fogbed_iota template):
+#   8080/tcp  validator gRPC (network-address)      8084/udp  P2P over QUIC (anemo)
+#   8083/tcp  Starfish consensus (primary address)  9184/tcp  Prometheus metrics
+#   9000/tcp  JSON-RPC (gateway / fullnode only)
+EXPOSE 8080/tcp 8083/tcp 8084/udp 9000/tcp 9184/tcp
 
-ENV IOTA_HOME=/app
-ENV IOTA_CONFIG_DIR=/app/config
-ENV RUST_LOG=info,iota=debug
-ENV RUST_BACKTRACE=1
+ENV IOTA_CONFIG_DIR=/iota/config \
+    IOTA_HOME=/app \
+    IOTA_LOG_DIR=/var/log/iota \
+    RUST_LOG=info,iota=debug \
+    RUST_BACKTRACE=1
 
-WORKDIR /app
+WORKDIR /iota
 
-ENTRYPOINT []
-CMD ["tail", "-f", "/dev/null"]
+# Reports unhealthy if the binaries drift from the pinned release, or if the node was
+# started and its config/process is gone. An idle container waiting for config is healthy.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD ["/usr/local/bin/iota-entrypoint.sh", "healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/iota-entrypoint.sh"]
+CMD ["wait"]

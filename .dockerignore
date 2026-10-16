@@ -32,3 +32,8 @@ tmp/
 *.log
 
 .iota_data
+# Build-context hygiene (IOTA v1.33.1 ingestion)
+docker/bins/.download/
+containernet-master/
+.venv/
+.iota_artifacts/

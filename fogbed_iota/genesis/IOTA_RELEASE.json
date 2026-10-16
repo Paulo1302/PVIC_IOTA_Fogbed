@@ -1,0 +1,36 @@
+{
+  "_comment": "Single source of truth for the IOTA release this ecosystem is pinned to. Read by fogbed_iota.genesis.release, docker/fetch_binaries.sh, docker/Dockerfile.local and docker/Dockerfile. Do not mix binaries, genesis artifacts or config schemas from another release.",
+  "release_tag": "v1.33.1",
+  "release_name": "[Mainnet] v1.33.1",
+  "release_url": "https://github.com/iotaledger/iota/releases/tag/v1.33.1",
+  "release_published_at": "2026-10-07T06:28:34Z",
+  "release_target_branch": "releases/iota-v1.33.0-release",
+  "source_repository": "https://github.com/iotaledger/iota",
+  "commit_sha": "97b1057f8de0ff220a1d0478b78a384cb484b0ef",
+  "commit_subject": "release: bump version to `1.33.1` (#13096)",
+  "version_string": "1.33.1-97b1057f8de0",
+  "protocol_version": 37,
+  "rust_toolchain": "1.98",
+  "target": {
+    "os": "linux",
+    "arch": "x86_64",
+    "libc": "glibc (built on GitHub Actions runner; runs on ubuntu:24.04)"
+  },
+  "asset": {
+    "name": "iota-v1.33.1-linux-x86_64.tgz",
+    "url": "https://github.com/iotaledger/iota/releases/download/v1.33.1/iota-v1.33.1-linux-x86_64.tgz",
+    "sha256": "1d397192a673f7df5d7cc5dd57e15319ccc3fa473a9c81d5161c06c5f9a9e20c",
+    "sha256_source": "GitHub release asset digest (API) and independently re-computed after download",
+    "size_bytes": 182171797
+  },
+  "binaries": {
+    "iota": "5f3753c29e1ba24f765701c90e19f23e59614a3be344cd01dec4f8418e937951",
+    "iota-node": "ce33525f03cb3669f79659bf1149f78e1faaab611ebd74e192e5254051a56a0c",
+    "iota-localnet": "0a893e1600849d6c144324cebe1cb52e638474f66239e1342f86966219c5dc97"
+  },
+  "binary_roles": {
+    "iota": "CLI: client / keytool / move / validator. NO LONGER has a `genesis` subcommand in v1.33.1.",
+    "iota-node": "Validator / fullnode process: `iota-node --config-path <validator.yaml>`.",
+    "iota-localnet": "Genesis builder: `iota-localnet genesis ...` (moved out of `iota` before v1.33.1)."
+  }
+}

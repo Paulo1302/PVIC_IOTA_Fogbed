@@ -1,0 +1,40 @@
+# docker/Dockerfile.build - reproducible FALLBACK: build iota / iota-node / iota-localnet from
+# the pinned v1.33.1 source commit. Only needed if the prebuilt release asset is unusable
+# (other architecture, incompatible libc, audit requirement). The default path is
+# docker/fetch_binaries.sh (the release publishes linux-x86_64 / linux-arm64 assets).
+#
+# Usage: ./docker/build_from_source.sh        (wraps `docker build --target export --output ...`)
+#
+# Build flow mirrors upstream docker/iota-node/Dockerfile (clang + lld, `--profile release`),
+# with `--locked` so Cargo.lock at the pinned commit is authoritative.
+ARG RUST_IMAGE=rust:1.98-bookworm
+FROM ${RUST_IMAGE} AS builder
+
+# Pinned to the commit the v1.33.1 tag points to (see fogbed_iota/genesis/IOTA_RELEASE.json).
+ARG IOTA_COMMIT=97b1057f8de0ff220a1d0478b78a384cb484b0ef
+# Consumed by `bin_version!()` -> `iota --version` prints "1.33.1-<first 12 chars>".
+ARG GIT_REVISION=97b1057f8de0
+ENV GIT_REVISION=${GIT_REVISION}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends cmake clang lld protobuf-compiler libpq-dev \
+      libssl-dev pkg-config libudev-dev libcap-dev git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p ~/.cargo && \
+    printf '[target.x86_64-unknown-linux-gnu]\nlinker = "clang"\nrustflags = ["-C", "link-arg=-fuse-ld=lld"]\n' > ~/.cargo/config.toml
+
+WORKDIR /iota
+RUN git init . && \
+    git remote add origin https://github.com/iotaledger/iota.git && \
+    git fetch --depth 1 origin "${IOTA_COMMIT}" && \
+    git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${IOTA_COMMIT}"
+
+RUN cargo build --release --locked \
+      --bin iota --bin iota-node --bin iota-localnet && \
+    mkdir -p /out && \
+    cp target/release/iota target/release/iota-node target/release/iota-localnet /out/
+
+FROM scratch AS export
+COPY --from=builder /out/ /

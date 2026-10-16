@@ -1,5 +1,23 @@
-node:
-  db-path: "/var/lib/iota/mainnetdb"
-  grpc-bind-address: "0.0.0.0:9002"
-  rest-api-bind-address: "0.0.0.0:9000"
-  p2p-bind-address: "0.0.0.0:9003"
+# IOTA v1.33.1 Gateway (Fullnode) Configuration Template
+# Schema verified against crates/iota-config/src/node.rs @ v1.33.1
+
+network-key-pair:
+  path: "/custom_config/network.key"
+
+db-path: "/app/db"
+network-address: /ip4/0.0.0.0/tcp/8080/http
+json-rpc-address: "0.0.0.0:9000"
+metrics-address: "0.0.0.0:9184"
+admin-interface-address: "127.0.0.1:1337"
+
+p2p-config:
+  listen-address: "0.0.0.0:8084"
+  external-address: /ip4/10.0.0.5/udp/8084/quic
+  seed-peers:
+    - address: /ip4/10.0.0.1/udp/8084/quic
+    - address: /ip4/10.0.0.2/udp/8084/quic
+    - address: /ip4/10.0.0.3/udp/8084/quic
+    - address: /ip4/10.0.0.4/udp/8084/quic
+
+genesis:
+  genesis-file-location: "/custom_config/genesis.blob"

@@ -1,48 +1,89 @@
-"""
-Distributed IOTA orchestration for Fogbed.
+"""Distributed and Local IOTA Network Orchestration for Fogbed.
 
-This module acts as the master controller for a real multi-host deployment:
-1. Register nodes and workers.
-2. Start FogbedDistributedExperiment only to allocate namespaces.
-3. Capture the dynamic 10.0.0.x addresses assigned by Fogbed.
-4. Generate genesis artifacts centrally.
-5. Ship configs to workers and boot the IOTA node inside each container.
+Supports:
+1. Local Mininet/Containernet emulation using standard FogbedExperiment
+   (e.g., examples/01_basic_network.py). No SSH/paramiko required.
+2. Distributed multi-host orchestration using FogbedDistributedExperiment and SSH sessions.
+   Requires `paramiko` (lazy loaded on demand).
+
+Both modes use the two-step genesis pipeline adhering strictly to IOTA release v1.33.1.
 """
 
 from __future__ import annotations
 
-import argparse
 import atexit
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
-import paramiko
 import yaml
 
-from fogbed import Container, FogbedDistributedExperiment
+try:
+    from fogbed import Container, FogbedExperiment, FogbedDistributedExperiment
+except (ImportError, AttributeError):
+    class Container:  # type: ignore
+        pass
+    class FogbedExperiment:  # type: ignore
+        pass
+    class FogbedDistributedExperiment:  # type: ignore
+        pass
 
-logger = logging.getLogger("network")
+from .genesis import (
+    Committee,
+    CommitteeSpec,
+    GenesisArtifacts,
+    GenesisBuilder,
+    ToolRunner,
+    load_release,
+    prepare_committee,
+)
+from .genesis.errors import GenesisError, NodeStartError
+
+logger = logging.getLogger("fogbed_iota.network")
 
 WORK_DIR = "/tmp/fogbed_iota_workdir"
-GENESIS_DIR = os.path.join(WORK_DIR, "genesis")
-LIVE_DATA_DIR = os.path.join(WORK_DIR, "live_data")
-DEFAULT_IMAGE = os.getenv("IOTA_DOCKER_IMAGE", "iota-fogbed-node:1.15.0")
+DEFAULT_IMAGE = os.getenv("IOTA_DOCKER_IMAGE", "iota-dev:latest")
+
+
+def _patch_mininet_containernet_intf_quirk() -> None:
+    """Silences benign Mininet quirk where empty TTY output from docker exec
+    causes false-positive 'Error setting <intf> up: ' warnings."""
+    try:
+        from mininet.link import Intf  # type: ignore
+        from mininet.log import error  # type: ignore
+
+        def patched_isUp(self: Any, setUp: bool = False) -> bool:
+            if setUp:
+                cmdOutput = self.ifconfig("up")
+                if cmdOutput and cmdOutput.strip():
+                    error(f"Error setting {self.name} up: {cmdOutput} ")
+                    return False
+                return True
+            return "UP" in self.ifconfig()
+
+        Intf.isUp = patched_isUp
+    except Exception:
+        pass
+
+
+_patch_mininet_containernet_intf_quirk()
 
 
 def _configure_logging(level: str = "INFO") -> None:
     if logger.handlers:
         return
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    handler.setFormatter(logging.Formatter("[%(levelname)s] [%(name)s] %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
@@ -50,7 +91,6 @@ def _configure_logging(level: str = "INFO") -> None:
 @dataclass(frozen=True)
 class WorkerEndpoint:
     """Physical worker accessible by Fogbed and SSH."""
-
     ip: str
     fogbed_port: int = 5000
     ssh_port: int = 22
@@ -60,25 +100,19 @@ class WorkerEndpoint:
     remote_root: str = field(default_factory=lambda: os.getenv("FOGBED_REMOTE_ROOT", "/tmp/pvic_iota_fogbed"))
 
 
-@dataclass
-class NodeSpec:
-    """Runtime metadata for a node managed by the master."""
-
-    name: str
-    role: str
-    worker: WorkerEndpoint
-    container: Container
-    datacenter_name: str
-    local_config_dir: Path
-    remote_config_dir: str
-    assigned_ip: Optional[str] = None
-    datacenter: Optional[object] = None
-
-
 class RemoteWorkerSession:
-    """Thin SSH/SFTP wrapper around paramiko."""
+    """SSH/SFTP wrapper around paramiko, lazily loaded only when distributed mode is used."""
 
     def __init__(self, endpoint: WorkerEndpoint) -> None:
+        try:
+            import paramiko  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "The 'paramiko' library is required for distributed multi-worker orchestration.\n"
+                "Please install it in your environment: pip install paramiko"
+            ) from exc
+
+        import paramiko
         self.endpoint = endpoint
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -118,12 +152,69 @@ class RemoteWorkerSession:
         return out
 
 
-class IotaNetwork:
-    """Master orchestrator for the distributed Fogbed deployment."""
+@dataclass
+class NodeSpec:
+    """Runtime metadata for a node in the IOTA network."""
+    name: str
+    role: str  # "validator" or "fullnode"
+    ip: str
+    container: Container
+    port_offset: int = 0
+    p2p_port: int = 8084
+    rpc_port: int = 9000
+    metrics_port: int = 9184
+    worker: Optional[WorkerEndpoint] = None
+    datacenter_name: str = "cloud"
+    local_config_dir: Optional[Path] = None
+    remote_config_dir: Optional[str] = None
+    assigned_ip: Optional[str] = None
+
+
+class IotaNode(Container):
+    """Fogbed container specialized for running an IOTA v1.33.1 node."""
 
     def __init__(
         self,
-        experiment: Optional[FogbedDistributedExperiment] = None,
+        name: str,
+        ip: str,
+        role: str = "validator",
+        port_offset: int = 0,
+        image: str = DEFAULT_IMAGE,
+        port_bindings: Optional[Dict[int, int]] = None,
+        **kwargs: Any,
+    ):
+        self.role = role
+        self.ip_addr = ip
+        self.port_offset = port_offset
+        self.p2p_port = 8084
+        self.rpc_port = 9000
+        self.metrics_port = 9184
+
+        env = {
+            "IOTA_CONFIG_DIR": "/custom_config",
+            "IOTA_NODE_ROLE": role,
+            "RUST_LOG": "info,iota=debug",
+            "RUST_BACKTRACE": "1",
+        }
+
+        super().__init__(
+            name=name,
+            dimage=image,
+            ip=ip,
+            environment=env,
+            privileged=True,
+            dcmd="tail -f /dev/null",
+            port_bindings=port_bindings or {},
+            **kwargs,
+        )
+
+
+class IotaNetwork:
+    """Unified Orchestrator for IOTA networks on Fogbed (Local & Distributed)."""
+
+    def __init__(
+        self,
+        experiment: Optional[Union[FogbedExperiment, FogbedDistributedExperiment]] = None,
         image: str = DEFAULT_IMAGE,
         log_level: str = "INFO",
         auto_cleanup: bool = True,
@@ -132,32 +223,37 @@ class IotaNetwork:
         workspace_root: Optional[Path] = None,
     ):
         _configure_logging(log_level)
-        self.exp = experiment if isinstance(experiment, FogbedDistributedExperiment) else FogbedDistributedExperiment()
         self.image = image
         self.auto_cleanup = auto_cleanup
-        self.workers = list(
-            workers
-            or [
-                WorkerEndpoint("192.168.1.10"),
-                WorkerEndpoint("192.168.1.11"),
-            ]
-        )
-        if len(self.workers) != 2:
-            raise ValueError("This orchestrator expects exactly two workers.")
+        self.release = load_release()
 
+        # Determine mode: distributed if FogbedDistributedExperiment or workers supplied
+        self.is_distributed = isinstance(experiment, FogbedDistributedExperiment) or bool(workers)
+
+        if experiment is not None:
+            self.exp = experiment
+        else:
+            self.exp = FogbedDistributedExperiment() if self.is_distributed else FogbedExperiment()
+
+        self.workers = list(workers) if workers else []
         self.remote_volume_root = remote_volume_root
-        self.workspace_root = workspace_root or Path(tempfile.mkdtemp(prefix="pvic_iota_fogbed_"))
+        self._workspace_owner = workspace_root is None
+        self.workspace_root = workspace_root or Path(tempfile.mkdtemp(prefix="iota_fogbed_"))
         self.genesis_dir = self.workspace_root / "genesis"
-        self.nodes_dir = self.workspace_root / "nodes"
         self.generated_dir = self.workspace_root / "generated"
+
         self.node_specs: Dict[str, NodeSpec] = {}
+        self.client_container: Optional[Container] = None
         self._topology_built = False
         self._cleanup_registered = False
-        self._workspace_owner = workspace_root is None
-        self.sessions = [RemoteWorkerSession(worker) for worker in self.workers]
-        self.client_container: Optional[Container] = None
+
         self.account_manager = None
         self.contract_manager = None
+        self.genesis_artifacts: Optional[GenesisArtifacts] = None
+
+        self.sessions: List[RemoteWorkerSession] = []
+        if self.is_distributed and self.workers:
+            self.sessions = [RemoteWorkerSession(w) for w in self.workers]
 
         if self.auto_cleanup:
             self._register_cleanup_handlers()
@@ -169,7 +265,13 @@ class IotaNetwork:
         if self._cleanup_registered:
             return
         atexit.register(self._cleanup_on_exit)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
         self._cleanup_registered = True
+
+    def _signal_handler(self, signum: int, frame: Any) -> None:
+        logger.info(f"\n⚠️ Received signal {signum}, cleaning up...")
+        self.stop()
 
     def _cleanup_on_exit(self) -> None:
         if self.auto_cleanup:
@@ -179,380 +281,323 @@ class IotaNetwork:
         if self._workspace_owner and self.workspace_root.exists():
             shutil.rmtree(self.workspace_root, ignore_errors=True)
 
-    def __enter__(self):
+    def __enter__(self) -> "IotaNetwork":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.stop()
-        return False
 
     def stop(self) -> None:
-        for session in self.sessions:
-            try:
-                session.connect()
-                for name in self.node_specs:
-                    session.run(f"docker exec -d mn.{name} pkill -9 iota-node 2>/dev/null || true")
-            except Exception:
-                pass
-            finally:
-                session.close()
+        logger.info("🛑 Stopping IOTA Network...")
+        if self.is_distributed and self.sessions:
+            for session in self.sessions:
+                try:
+                    session.connect()
+                    for name in self.node_specs:
+                        session.run(f"docker exec mn.{name} pkill -9 iota-node 2>/dev/null || true")
+                except Exception as exc:
+                    logger.debug("Failed remote stop: %s", exc)
+                finally:
+                    session.close()
+        else:
+            for spec in self.node_specs.values():
+                try:
+                    subprocess.run(
+                        ["docker", "exec", f"mn.{spec.name}", "pkill", "-9", "iota-node"],
+                        capture_output=True,
+                        check=False,
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to stop node %s: %s", spec.name, exc)
 
-        try:
-            self.exp.stop()
-        finally:
-            if self.auto_cleanup:
-                self.cleanup_workspace()
+        if self.auto_cleanup:
+            self.cleanup_workspace()
+        logger.info("✅ IOTA Network stopped")
 
     # ------------------------------------------------------------------
     # Node registration
     # ------------------------------------------------------------------
-    def _node_remote_dir(self, node_name: str) -> str:
-        return f"{self.remote_volume_root}/{node_name}"
-
-    def _create_node(self, name: str, role: str, worker: WorkerEndpoint) -> NodeSpec:
-        container = Container(
+    def add_validator(self, name: str, ip: str) -> IotaNode:
+        """Registers a validator node with static IP."""
+        logger.info(f"Adding validator: {name} @ {ip}")
+        worker = self.workers[0] if (self.is_distributed and self.workers) else None
+        container = IotaNode(name=name, ip=ip, role="validator", port_offset=len(self.node_specs), image=self.image)
+        spec = NodeSpec(
             name=name,
-            dimage=self.image,
-            ip=None,
-            privileged=True,
-            dcmd="wait",
-            environment={
-                "IOTA_CONFIG_DIR": "/iota/config",
-                "IOTA_NODE_ROLE": role,
-                "RUST_LOG": "info,iota=debug",
-            },
-            volumes=[f"{self._node_remote_dir(name)}:/iota/config"],
-            link_params={"delay": "50ms", "bw": 10},
-        )
-        node = NodeSpec(
-            name=name,
-            role=role,
-            worker=worker,
+            role="validator",
+            ip=ip,
             container=container,
-            datacenter_name=f"dc-{name}",
+            port_offset=len(self.node_specs),
+            worker=worker,
+            datacenter_name="cloud",
             local_config_dir=self.generated_dir / name,
-            remote_config_dir=self._node_remote_dir(name),
+            remote_config_dir=f"{self.remote_volume_root}/{name}" if worker else None,
+            assigned_ip=ip,
         )
-        self.node_specs[name] = node
-        return node
+        self.node_specs[name] = spec
+        return container
 
-    def add_validator(self, name: str, ip: Optional[str] = None) -> NodeSpec:
-        _ = ip  # Kept for compatibility with the previous API.
-        worker = self.workers[0]
-        return self._create_node(name, "validator", worker)
+    def add_gateway(
+        self,
+        name: str,
+        ip: str,
+        port_bindings: Optional[Dict[int, int]] = None,
+        bind_host_ports: bool = True,
+        **kwargs: Any,
+    ) -> IotaNode:
+        """Registers a gateway (fullnode) node with static IP."""
+        logger.info(f"Adding gateway (fullnode): {name} @ {ip}")
+        worker = self.workers[1] if (self.is_distributed and len(self.workers) > 1) else (self.workers[0] if self.workers else None)
+        
+        bindings: Dict[int, int] = {}
+        if port_bindings is not None:
+            bindings = port_bindings
+        elif bind_host_ports and not self.is_distributed:
+            bindings = {9000: 9000, 9184: 9184}
 
-    def add_gateway(self, name: str, ip: Optional[str] = None) -> NodeSpec:
-        _ = ip
-        worker = self.workers[1]
-        return self._create_node(name, "fullnode", worker)
+        container = IotaNode(
+            name=name,
+            ip=ip,
+            role="fullnode",
+            port_offset=len(self.node_specs),
+            image=self.image,
+            port_bindings=bindings,
+            **kwargs,
+        )
+        spec = NodeSpec(
+            name=name,
+            role="fullnode",
+            ip=ip,
+            container=container,
+            port_offset=len(self.node_specs),
+            worker=worker,
+            datacenter_name="cloud",
+            local_config_dir=self.generated_dir / name,
+            remote_config_dir=f"{self.remote_volume_root}/{name}" if worker else None,
+            assigned_ip=ip,
+        )
+        self.node_specs[name] = spec
+        return container
 
     def set_client(self, container: Container) -> None:
-        """Compatibility hook for older examples.
-
-        In the distributed deployment the orchestrated nodes are registered
-        with add_validator/add_gateway. A standalone client container can still
-        be attached here if a caller needs it for CLI access.
-        """
-
+        """Registers a client container for user interactions / smart contracts."""
+        logger.info(f"Setting client container: {container.name}")
         self.client_container = container
 
     # ------------------------------------------------------------------
-    # Fogbed wiring
+    # Topology Wiring
     # ------------------------------------------------------------------
     def attach_to_experiment(self, datacenter_name: str = "cloud") -> None:
         if self._topology_built:
             return
 
-        _ = datacenter_name
-        for worker in self.workers:
-            self.exp.add_worker(worker.ip, port=worker.fogbed_port)
+        if self.is_distributed:
+            for worker in self.workers:
+                self.exp.add_worker(worker.ip, port=worker.fogbed_port)
 
-        for node in self.node_specs.values():
-            datacenter = self.exp.add_virtual_instance(node.datacenter_name)
-            self.exp.add_docker(node.container, datacenter)
-            self.exp.get_worker(node.worker.ip).add(datacenter, reachable=True)
-            node.datacenter = datacenter
+            for spec in self.node_specs.values():
+                dc = self.exp.add_virtual_instance(f"dc-{spec.name}")
+                self.exp.add_docker(spec.container, dc)
+                if spec.worker:
+                    self.exp.get_worker(spec.worker.ip).add(dc, reachable=True)
+            if len(self.workers) >= 2:
+                self.exp.add_tunnel(self.exp.get_worker(self.workers[0].ip), self.exp.get_worker(self.workers[1].ip))
+        else:
+            # Local FogbedExperiment
+            try:
+                dc = self.exp.get_virtual_instance(datacenter_name)
+            except Exception:
+                dc = None
+            if dc is None:
+                dc = self.exp.add_virtual_instance(datacenter_name)
 
-        self._add_topology_links()
+            for spec in self.node_specs.values():
+                self.exp.add_docker(spec.container, datacenter=dc)
+
+            if self.client_container:
+                self.exp.add_docker(self.client_container, datacenter=dc)
+
         self._topology_built = True
-
-    def _add_topology_links(self) -> None:
-        client = self.node_specs.get("client")
-        device = self.node_specs.get("device")
-        gateway = self.node_specs.get("gateway")
-
-        if client and device:
-            self.exp.add_link(client.datacenter, device.datacenter, delay="50ms", bw=10)
-        if device and gateway:
-            self.exp.add_link(device.datacenter, gateway.datacenter, delay="50ms", bw=10)
-
-        self.exp.add_tunnel(self.exp.get_worker(self.workers[0].ip), self.exp.get_worker(self.workers[1].ip))
+        logger.info("✅ All nodes attached to experiment")
 
     # ------------------------------------------------------------------
-    # Two-step genesis
+    # Two-step Genesis Execution
     # ------------------------------------------------------------------
-    def _run_docker(self, args: Sequence[str], cwd: Optional[Path] = None) -> None:
-        subprocess.run(list(args), cwd=str(cwd) if cwd else None, check=True)
-
-    def _all_nodes(self) -> List[NodeSpec]:
-        return [self.node_specs[name] for name in ("client", "device", "gateway") if name in self.node_specs]
-
-    def _validator_nodes(self) -> List[NodeSpec]:
-        return [node for node in self._all_nodes() if node.role == "validator"]
-
-    def capture_ips(self) -> None:
-        for node in self._all_nodes():
-            node.assigned_ip = node.container.ip
-            logger.info("%s assigned IP %s", node.name, node.assigned_ip)
-
     def generate_genesis_artifacts(self) -> None:
-        self.genesis_dir.mkdir(parents=True, exist_ok=True)
-        self.generated_dir.mkdir(parents=True, exist_ok=True)
+        """Executes Step 1 (committee prep) and Step 2 (genesis build) deterministically."""
+        validators = [s for s in self.node_specs.values() if s.role == "validator"]
+        gateways = [s for s in self.node_specs.values() if s.role == "fullnode"]
 
-        validator_ips = [node.assigned_ip for node in self._validator_nodes()]
-        validator_ips = [ip for ip in validator_ips if ip]
-        if not validator_ips:
-            raise RuntimeError("No validator IPs available for genesis generation")
+        if not validators:
+            raise GenesisError("At least one validator is required to generate genesis.")
 
-        cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "/usr/local/bin/iota",
-            "-v",
-            f"{self.genesis_dir}:/work",
-            self.image,
-            "genesis",
-            "--working-dir",
-            "/work",
-            "--force",
-            "--committee-size",
-            str(len(validator_ips)),
-            "--benchmark-ips",
-            *validator_ips,
-            "--chain-start-timestamp-ms",
-            str(int(time.time() * 1000)),
-            "--epoch-duration-ms",
-            "86400000",
-        ]
-        self._run_docker(cmd)
+        val_tuples = [(v.name, v.ip) for v in validators]
+        gw_tuples = [(g.name, g.ip) for g in gateways]
 
-        genesis_blob = self.genesis_dir / "genesis.blob"
-        network_yaml = self.genesis_dir / "network.yaml"
-        if not genesis_blob.exists():
-            raise RuntimeError(f"genesis.blob not generated at {genesis_blob}")
-        if not network_yaml.exists():
-            raise RuntimeError(f"network.yaml not generated at {network_yaml}")
-
-        self._patch_network_yaml(network_yaml, validator_ips)
-        self._materialize_node_configs(genesis_blob, network_yaml)
-
-    def _patch_network_yaml(self, path: Path, validator_ips: Sequence[str]) -> None:
-        content = path.read_text(encoding="utf-8")
-        try:
-            data = yaml.safe_load(content)
-        except yaml.YAMLError:
-            data = None
-
-        if isinstance(data, dict):
-            if "validator_configs" in data:
-                for index, cfg in enumerate(data["validator_configs"]):
-                    if index >= len(validator_ips):
-                        break
-                    ip = validator_ips[index]
-                    if isinstance(cfg, dict):
-                        if cfg.get("network-address"):
-                            cfg["network-address"] = f"/ip4/{ip}/tcp/8080/http"
-                        p2p = cfg.get("p2p-config")
-                        if isinstance(p2p, dict):
-                            p2p["listen-address"] = "0.0.0.0:8080"
-                            p2p["external-address"] = f"/ip4/{ip}/udp/8080/quic"
-                path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-                return
-
-            if "consensus" in data:
-                consensus = data.setdefault("consensus", {})
-                genesis = consensus.setdefault("genesis", {})
-                genesis["validators"] = [{"address": f"{ip}:8080"} for ip in validator_ips]
-                path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-                return
-
-        patched = content
-        for ip in validator_ips:
-            patched = patched.replace("127.0.0.1", ip, 1)
-        path.write_text(patched, encoding="utf-8")
-
-    def _render_node_config(self, node: NodeSpec, validator_ips: Sequence[str]) -> str:
-        rpc_port = 9000 if node.role == "fullnode" else 9001
-        self_ip = node.assigned_ip or "127.0.0.1"
-        payload = {
-            "node": {
-                "db-path": "/var/lib/iota/mainnetdb",
-                "grpc-bind-address": "0.0.0.0:9002",
-                "rest-api-bind-address": f"0.0.0.0:{rpc_port}",
-                "p2p-bind-address": "0.0.0.0:8080",
-            },
-            "consensus": {
-                "authority-key-pair": {"path": "/iota/config/authority.key"},
-                "network-key-pair": {"path": "/iota/config/network.key"},
-                "genesis": {
-                    "genesis-file-location": "/iota/config/genesis.blob",
-                    "validators": [{"address": f"{ip}:8080"} for ip in validator_ips],
-                },
-                "p2p-config": {
-                    "listen-address": "0.0.0.0:8080",
-                    "external-address": f"/ip4/{self_ip}/udp/8080/quic",
-                    "seed-peers": [
-                        {"address": f"/ip4/{ip}/udp/8080/quic"}
-                        for ip in validator_ips
-                        if ip != self_ip
-                    ],
-                },
-            },
-        }
-        if node.role == "fullnode":
-            payload["node"]["rest-api-bind-address"] = "0.0.0.0:9000"
-        return yaml.safe_dump(payload, sort_keys=False)
-
-    def _materialize_node_configs(self, genesis_blob: Path, network_yaml: Path) -> None:
-        validator_ips = [node.assigned_ip for node in self._validator_nodes() if node.assigned_ip]
-        for node in self._all_nodes():
-            node.local_config_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(genesis_blob, node.local_config_dir / "genesis.blob")
-            shutil.copy2(network_yaml, node.local_config_dir / "network.yaml")
-            (node.local_config_dir / "validator.yaml").write_text(
-                self._render_node_config(node, validator_ips),
-                encoding="utf-8",
-            )
-            metadata = {
-                "name": node.name,
-                "role": node.role,
-                "worker": node.worker.ip,
-                "ip": node.assigned_ip,
-            }
-            (node.local_config_dir / "node.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
-            for key_name in ("authority.key", "network.key", "iota.keystore", "benchmark.keystore"):
-                source = self.genesis_dir / key_name
-                if source.exists():
-                    shutil.copy2(source, node.local_config_dir / key_name)
-
-    # ------------------------------------------------------------------
-    # Distribution and boot
-    # ------------------------------------------------------------------
-    def _sync_node_configs(self) -> None:
-        for session in self.sessions:
-            session.connect()
-
-        try:
-            for node in self._all_nodes():
-                session = next(s for s in self.sessions if s.endpoint.ip == node.worker.ip)
-                session.mkdir_p(node.remote_config_dir)
-                for file_name in ("genesis.blob", "network.yaml", "validator.yaml", "node.json"):
-                    path = node.local_config_dir / file_name
-                    if path.exists():
-                        session.put_file(path, f"{node.remote_config_dir}/{file_name}")
-                for key_name in ("authority.key", "network.key", "iota.keystore", "benchmark.keystore"):
-                    path = node.local_config_dir / key_name
-                    if path.exists():
-                        session.put_file(path, f"{node.remote_config_dir}/{key_name}")
-        finally:
-            for session in self.sessions:
-                session.close()
-
-    def _boot_node(self, session: RemoteWorkerSession, node_name: str) -> None:
-        session.run(f"docker exec -d mn.{node_name} /usr/local/bin/iota-entrypoint.sh start-node")
-
-    def _wait_for_gateway_rpc(self, timeout: int = 180) -> None:
-        gateway = self.node_specs.get("gateway")
-        if gateway is None:
-            return
-
-        session = next(s for s in self.sessions if s.endpoint.ip == gateway.worker.ip)
-        deadline = time.time() + timeout
-        payload = '{"jsonrpc":"2.0","method":"iota_getChainIdentifier","params":[],"id":1}'
-        curl_cmd = (
-            f"docker exec mn.{gateway.name} curl -s -X POST http://127.0.0.1:9000 "
-            f"-H 'Content-Type: application/json' -d '{payload}'"
+        spec = CommitteeSpec(
+            network_name="fogbed-iota",
+            validators=val_tuples,
+            gateways=gw_tuples,
+            subnet=None,  # Accept any valid non-loopback IP
         )
 
-        while time.time() < deadline:
-            try:
-                output = session.run(curl_cmd, timeout=30)
-                if "\"result\"" in output and "\"error\"" not in output:
-                    return
-            except Exception:
-                time.sleep(3)
-                continue
-            time.sleep(3)
-        raise RuntimeError("Gateway RPC did not become ready in time")
+        tools = ToolRunner(image=self.image)
+        logger.info("Step 1: Preparing deterministic committee state...")
+        committee = prepare_committee(
+            state_dir=self.genesis_dir,
+            spec=spec,
+            tools=tools,
+            force=True,
+        )
 
-    def bootstrap_nodes(self) -> None:
+        logger.info("Step 2: Building genesis.blob and node configurations...")
+        builder = GenesisBuilder(tools=tools)
+        self.genesis_artifacts = builder.build(
+            committee=committee,
+            output_dir=self.generated_dir,
+            container_config_dir="/custom_config",
+        )
+
+    def _sync_and_boot_local(self) -> None:
+        """Injects artifacts and boots nodes in local Fogbed containers."""
+        if not self.genesis_artifacts:
+            raise GenesisError("Genesis artifacts not generated.")
+
+        for name, spec in self.node_specs.items():
+            node_art = self.genesis_artifacts.nodes.get(name)
+            if not node_art:
+                continue
+
+            logger.info(f"Injecting configuration into mn.{name}...")
+            # Ensure target config directory exists
+            subprocess.run(["docker", "exec", f"mn.{name}", "mkdir", "-p", "/custom_config"], check=True)
+
+            # Copy validator.yaml and genesis.blob into container
+            subprocess.run(
+                ["docker", "cp", f"{node_art.validator_yaml}", f"mn.{name}:/custom_config/validator.yaml"],
+                check=True,
+            )
+            subprocess.run(
+                ["docker", "cp", f"{node_art.genesis_blob}", f"mn.{name}:/custom_config/genesis.blob"],
+                check=True,
+            )
+
+            # Boot iota-node using the container entrypoint
+            logger.info(f"Starting iota-node inside mn.{name}...")
+            boot_cmd = (
+                "set -e; "
+                "mkdir -p /var/log/iota; "
+                "nohup /usr/local/bin/iota-node --config-path /custom_config/validator.yaml "
+                "> /var/log/iota/iota-node.log 2>&1 & "
+                "echo $! > /var/log/iota/iota-node.pid"
+            )
+            subprocess.run(["docker", "exec", "-d", f"mn.{name}", "bash", "-c", boot_cmd], check=True)
+
+    def _sync_and_boot_distributed(self) -> None:
+        """Ships files to remote workers and boots nodes via SSH."""
+        if not self.genesis_artifacts:
+            raise GenesisError("Genesis artifacts not generated.")
+
         for session in self.sessions:
             session.connect()
 
         try:
-            for node in self._all_nodes():
-                session = next(s for s in self.sessions if s.endpoint.ip == node.worker.ip)
-                self._boot_node(session, node.name)
-            self._wait_for_gateway_rpc()
+            for name, spec in self.node_specs.items():
+                if not spec.worker:
+                    continue
+                node_art = self.genesis_artifacts.nodes.get(name)
+                if not node_art:
+                    continue
+
+                session = next(s for s in self.sessions if s.endpoint.ip == spec.worker.ip)
+                session.mkdir_p(spec.remote_config_dir)
+                session.put_file(node_art.validator_yaml, f"{spec.remote_config_dir}/validator.yaml")
+                session.put_file(node_art.genesis_blob, f"{spec.remote_config_dir}/genesis.blob")
+
+                boot_cmd = f"docker exec -d mn.{name} /usr/local/bin/iota-entrypoint.sh start-node"
+                session.run(boot_cmd)
         finally:
             for session in self.sessions:
                 session.close()
+
+    def _wait_for_readiness(self, timeout: int = 120) -> None:
+        """Polls gateway RPC until chain identifier is available."""
+        gateways = [s for s in self.node_specs.values() if s.role == "fullnode"]
+        target = gateways[0] if gateways else next(iter(self.node_specs.values()), None)
+        if target is None:
+            return
+
+        logger.info(f"Waiting for RPC on {target.name} ({target.ip}:9000)...")
+        deadline = time.time() + timeout
+        payload = json.dumps({"jsonrpc": "2.0", "method": "iota_getChainIdentifier", "params": [], "id": 1})
+        check_cmd = [
+            "docker", "exec", f"mn.{target.name}",
+            "curl", "-s", "-X", "POST", "http://127.0.0.1:9000",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+        ]
+
+        while time.time() < deadline:
+            res = subprocess.run(check_cmd, capture_output=True, text=True)
+            if '"result"' in res.stdout:
+                logger.info(f"✅ Node {target.name} RPC is ready!")
+                return
+            time.sleep(2)
+
+        # Failure diagnosis: fetch tail of log
+        tail_res = subprocess.run(["docker", "exec", f"mn.{target.name}", "tail", "-n", "30", "/var/log/iota/iota-node.log"], capture_output=True, text=True)
+        raise NodeStartError(
+            f"Node {target.name} failed to expose RPC within {timeout}s",
+            hint=f"Check logs:\n{tail_res.stdout or tail_res.stderr}",
+        )
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def start(self) -> None:
-        try:
-            self.attach_to_experiment()
-            self.exp.start()
-            self.capture_ips()
-            self.generate_genesis_artifacts()
-            self._sync_node_configs()
-            self.bootstrap_nodes()
-        except Exception:
-            try:
-                self.exp.stop()
-            finally:
-                raise
+        """Main startup sequence."""
+        logger.info("=" * 60)
+        logger.info(f"Starting IOTA Network (Release {self.release.tag})")
+        logger.info("=" * 60)
+
+        # 1. Generate artifacts using the two-step genesis
+        self.generate_genesis_artifacts()
+
+        # 2. Inject configs and boot
+        if self.is_distributed:
+            self._sync_and_boot_distributed()
+        else:
+            self._sync_and_boot_local()
+
+        # 3. Wait for readiness
+        self._wait_for_readiness()
+        logger.info("✅ IOTA Network is running and verified!")
 
     def run(self) -> None:
         self.start()
 
-    def get_rpc_url(self) -> Optional[str]:
-        gateway = self.node_specs.get("gateway")
-        if gateway and gateway.assigned_ip:
-            return f"http://{gateway.assigned_ip}:9000"
+    def get_rpc_url(self, host: bool = False) -> Optional[str]:
+        gateways = [s for s in self.node_specs.values() if s.role == "fullnode"]
+        if gateways:
+            ip = "localhost" if host else gateways[0].ip
+            return f"http://{ip}:9000"
         return None
 
-    def get_metrics_url(self) -> Optional[str]:
-        gateway = self.node_specs.get("gateway")
-        if gateway and gateway.assigned_ip:
-            return f"http://{gateway.assigned_ip}:9184/metrics"
+    def get_metrics_url(self, host: bool = False) -> Optional[str]:
+        gateways = [s for s in self.node_specs.values() if s.role == "fullnode"]
+        if gateways:
+            ip = "localhost" if host else gateways[0].ip
+            return f"http://{ip}:9184/metrics"
         return None
-
-    @classmethod
-    def create_network(
-        cls,
-        experiment: Optional[FogbedDistributedExperiment] = None,
-        image: str = DEFAULT_IMAGE,
-        workers: Optional[Sequence[WorkerEndpoint]] = None,
-    ) -> "IotaNetwork":
-        net = cls(experiment=experiment, image=image, workers=workers)
-        net.add_validator("client")
-        net.add_validator("device")
-        net.add_gateway("gateway")
-        return net
 
 
 DistributedIotaMaster = IotaNetwork
 
 __all__ = [
-    "WorkerEndpoint",
-    "NodeSpec",
-    "RemoteWorkerSession",
     "IotaNetwork",
+    "IotaNode",
+    "NodeSpec",
+    "WorkerEndpoint",
+    "RemoteWorkerSession",
     "DistributedIotaMaster",
 ]

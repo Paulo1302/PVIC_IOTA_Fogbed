@@ -1,17 +1,25 @@
-node:
-  db-path: "/var/lib/iota/mainnetdb"
-  grpc-bind-address: "0.0.0.0:9002"
-  rest-api-bind-address: "0.0.0.0:9001"
-  p2p-bind-address: "0.0.0.0:9003"
-  
-consensus:
-  authority-key-pair:
-    path: "/custom_config/authority.key"
-  network-key-pair:
-    path: "/custom_config/network.key"
-  genesis:
-    validators:
-      - address: "10.0.0.1:9003"
-      - address: "10.0.0.2:9003"
-      - address: "10.0.0.3:9003"
-      - address: "10.0.0.4:9003"
+# IOTA v1.33.1 Validator 4 Configuration Template
+authority-key-pair:
+  path: "/custom_config/authority.key"
+protocol-key-pair:
+  path: "/custom_config/protocol.key"
+account-key-pair:
+  path: "/custom_config/account.key"
+network-key-pair:
+  path: "/custom_config/network.key"
+
+db-path: "/app/db"
+network-address: /ip4/0.0.0.0/tcp/8080/http
+metrics-address: "0.0.0.0:9184"
+admin-interface-address: "127.0.0.1:1337"
+
+consensus-config:
+  db-path: "/app/consensus_db"
+
+p2p-config:
+  listen-address: "0.0.0.0:8084"
+  external-address: /ip4/10.0.0.4/udp/8084/quic
+  seed-peers: []
+
+genesis:
+  genesis-file-location: "/custom_config/genesis.blob"
