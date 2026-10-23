@@ -66,13 +66,14 @@ class Ports:
     metrics: int = 9184    # tcp  Prometheus
     admin: int = 1337      # tcp  admin interface (loopback only)
     json_rpc: int = 9000   # tcp  JSON-RPC (gateway/fullnode only)
+    grpc: int = 50051      # tcp  gRPC API (gateway/fullnode only)
 
     def shifted(self, delta: int) -> "Ports":
-        return Ports(*(v + delta for v in (self.network, self.consensus, self.p2p, self.metrics, self.admin, self.json_rpc)))
+        return Ports(*(v + delta for v in (self.network, self.consensus, self.p2p, self.metrics, self.admin, self.json_rpc, self.grpc)))
 
     def as_dict(self) -> Dict[str, int]:
         return dict(network=self.network, consensus=self.consensus, p2p=self.p2p,
-                    metrics=self.metrics, admin=self.admin, json_rpc=self.json_rpc)
+                    metrics=self.metrics, admin=self.admin, json_rpc=self.json_rpc, grpc=self.grpc)
 
 
 @dataclass

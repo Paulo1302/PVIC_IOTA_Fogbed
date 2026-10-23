@@ -215,7 +215,7 @@ export RUST_LOG="info,iota_node=debug"      # Logging level
 ```python
 # Customize P2P ports (auto-assigned by default)
 node = iota_net.add_validator("val1", "10.0.0.1")
-print(f"P2P Port: {node.p2p_port}")  # 2001, 2011, 2021...
+print(f"P2P Port: {node.p2p_port}")  # 8084 (padrão IOTA v1.33.1 com QUIC)
 
 # Customize RPC port
 gateway = iota_net.add_gateway("gw", "10.0.0.100")
@@ -266,6 +266,24 @@ docker exec -it mn.gateway tail -f /app/iota.log
 
 ```bash
 curl http://10.0.0.100:9184/metrics | grep iota_
+```
+
+### Telemetria e Benchmarks Quantitativos (Exemplo 06)
+
+O módulo `fogbed_iota.telemetry` implementa a coleta científica de métricas de desempenho sob topologia em 3 camadas (Borda · Névoa · Nuvem):
+
+- **Separação de Cargas e Unidades**:
+  - **Consultas JSON-RPC (Leitura)**: Medidas estritamente em **`RPC req/s`** (ex: `iota_getLatestCheckpointSequenceNumber`). Amostragem recomendada: 100 a 1.000 requisições para confiabilidade estatística (percentis $p50$, $p90$, $p95$, $p99$).
+  - **Transações L1 (Escrita)**: Medidas estritamente em **`Confirmed tx/s`** (TPS) via transferências reais Move-VM (`pay_iota` / PTB). Amostragem recomendada: 10 a 50 transações por rajada.
+- **Medição Individual de Finalidade ($t_{ack}$ e $t_{finality}$)**:
+  - Registra o intervalo exato entre o disparo na Borda e a confirmação de inclusão em bloco com verificação de efeitos no Gateway via JSON-RPC.
+- **Monitoramento de Recursos do Cliente e Nós**:
+  - Captura CPU %, RAM (MB e %), I/O de rede e de bloco diretamente dos cgroups de todos os contêineres Docker (incluindo `mn.client` durante a injeção de carga).
+
+```bash
+# Execução do benchmark quantitativo completo:
+sudo mn -c
+sudo PYTHONPATH="$(pwd)" ./venv/bin/python3 examples/06_telemetry_and_benchmarks.py --requests 100 --tx-count 20
 ```
 
 ### Using IOTA CLI
@@ -370,19 +388,29 @@ fogbed-iota/
 ├── fogbed_iota/           # Main Python package
 │   ├── __init__.py        # Package initialization
 │   ├── __version__.py     # Version information
-│   └── network.py         # Core IotaNetwork orchestrator
+│   ├── network.py         # Core IotaNetwork orchestrator
+│   ├── topology.py        # Multi-tier topology models (Edge, Fog, Cloud)
+│   ├── multitier_check.py # Cross-tier validation engine
+│   └── telemetry/         # Quantitative performance & telemetry suite
+│       ├── docker_monitor.py     # Container CPU/RAM/IO background sampler
+│       ├── prometheus_scraper.py # IOTA Prometheus :9184 metrics extractor
+│       ├── rpc_client.py         # JSON-RPC E2E latency & block counter probe
+│       ├── benchmark.py          # Transaction burst & workload generator
+│       └── exporter.py           # Statistical quantifier (p50/p95/p99) and CSV/JSON exporter
 ├── docker/                # Docker configurations
 │   ├── Dockerfile         # Production image (downloads binaries, requires internet)
 │   ├── Dockerfile.local   # Build from local binaries in docker/bins/ (offline)
 │   └── bins/              # Pre-downloaded IOTA binaries (gitignored, copy manually)
 ├── examples/              # Usage examples
-│   ├── 01_basic_network.py      # 4 validators + gateway
-│   └── 02_complete_network.py   # Advanced example with client
+│   ├── 01_basic_network.py             # 4 validators + gateway
+│   ├── 02_complete_network.py          # Advanced example with client
+│   ├── 05_three_tier_topology.py       # 3-tier topology (Edge · Fog · Cloud)
+│   └── 06_telemetry_and_benchmarks.py  # Automated telemetry & benchmark suite
 ├── scripts/               # Utility scripts
 │   ├── build_docker.sh          # Build Docker images
 │   ├── test_network.sh          # Automated tests
 │   └── install_iota_host.sh     # Install binary to host
-├── tests/                 # Unit and integration tests
+├── tests/                 # Unit and integration tests (94 tests)
 ├── docs/                  # Documentation
 └── README.md
 ```

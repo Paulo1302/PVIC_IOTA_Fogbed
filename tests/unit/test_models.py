@@ -70,7 +70,7 @@ def test_iota_node_config():
     logger.info(f"   Metrics Port: {config.metrics_port}")
     
     # Testar que portas foram calculadas
-    assert config.p2p_port == 2001
+    assert config.p2p_port == 8084
     assert config.rpc_port == 9000
     assert config.metrics_port == 9184
     logger.info("✅ Ports calculated correctly")
@@ -78,7 +78,7 @@ def test_iota_node_config():
     # Testar serialização
     data = config.to_dict()
     assert data['name'] == "iota1"
-    assert data['p2p_port'] == 2001
+    assert data['p2p_port'] == 8084
     logger.info("✅ to_dict() works")
     
     # Testar desserialização
@@ -179,7 +179,7 @@ def test_validator_node():
     logger.info(f"   Consensus DB: {validator.get_consensus_db_path()}")
     
     assert validator.config.role == NodeRole.VALIDATOR
-    assert validator.get_p2p_address() == "/ip4/10.0.0.1/udp/2001"
+    assert validator.get_p2p_address() == "/ip4/10.0.0.1/udp/8084/quic"
     assert validator.get_rpc_endpoint() is None
     logger.info("✅ ValidatorNode properties correct")
     
@@ -213,8 +213,9 @@ def test_fullnode_node():
     logger.info(f"   Metrics: {fullnode.get_metrics_endpoint()}")
     
     assert fullnode.config.role == NodeRole.FULLNODE
-    assert fullnode.get_rpc_endpoint() == "http://10.0.0.5:9040"  # certo com offset 4
+    assert fullnode.get_p2p_address() == "/ip4/10.0.0.5/udp/8124/quic"
     assert fullnode.get_rpc_endpoint() == "http://10.0.0.5:9040"  # port_offset=4 -> 9000 + 40 = 9040
+    assert fullnode.get_metrics_endpoint() == "http://10.0.0.5:9224/metrics"
     logger.info("✅ FullnodeNode properties correct")
     
     # Testar que rejeita role errada
@@ -244,7 +245,7 @@ def test_port_offset():
             port_offset=offset
         )
         
-        expected_p2p = 2001 + (offset * 10)
+        expected_p2p = 8084 + (offset * 10)
         assert config.p2p_port == expected_p2p
         
         logger.info(f"✅ Offset {offset}: P2P port = {config.p2p_port}")

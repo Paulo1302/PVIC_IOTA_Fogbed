@@ -110,7 +110,7 @@ def test_port_calculation():
 
         # Validar cálculo de portas
         config = node.config
-        expected_p2p = 2001 + (offset * 10)
+        expected_p2p = 8084 + (offset * 10)
         expected_rpc = 9000 + (offset * 10)
         expected_metrics = 9184 + (offset * 10)
 

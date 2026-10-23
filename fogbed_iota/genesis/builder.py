@@ -254,6 +254,7 @@ class GenesisBuilder:
             }
         else:
             config["json-rpc-address"] = f"0.0.0.0:{node.ports['json_rpc']}"
+            config["enable-grpc-api"] = True
 
         return config
 

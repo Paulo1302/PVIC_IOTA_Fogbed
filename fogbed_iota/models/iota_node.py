@@ -4,7 +4,19 @@
 Modelo de dados para nós IOTA
 
 Define estrutura e validação de nós validadores e fullnodes com ports parametrizados
-e subtipos operacionais alinhados à arquitetura da rede IOTA.
+e subtipos operacionais alinhados à arquitetura da rede IOTA v1.33.1.
+
+Portas e Protocolos Padrão (IOTA v1.33.1):
+- P2P Primário: UDP 8084 com QUIC (/ip4/<ip>/udp/8084/quic)
+- Consenso / Worker: TCP 8080 (ou UDP 8081)
+- JSON-RPC: TCP 9000
+- Métricas Prometheus: TCP 9184
+
+Nota Arquitetural:
+- `fogbed_iota.models` fornece abstrações lógicas de domínio (`IotaNodeConfig`, `ValidatorNode`, etc.).
+- `fogbed_iota.network.IotaNetwork` orquestra os contêineres reais no Mininet/Fogbed (`IotaNode`).
+No Mininet, cada nó possui seu namespace de rede e IP dedicado (10.0.0.X); `port_offset` é
+utilizado quando se deseja deslocar portas para evitar colisões em namespaces compartilhados.
 """
 
 from dataclasses import dataclass, field
@@ -77,8 +89,8 @@ class IotaNodeConfig:
     rpc_port: Optional[int] = field(init=False, default=None)
     metrics_port: Optional[int] = field(init=False, default=None)
 
-    # Base ports (configuráveis para evitar conflitos)
-    BASE_P2P_PORT: int = 2001
+    # Base ports alinhados com IOTA v1.33.1 (configuráveis para evitar conflitos)
+    BASE_P2P_PORT: int = 8084
     BASE_RPC_PORT: int = 9000
     BASE_METRICS_PORT: int = 9184
     PORT_STEP: int = 10  # Incremento entre offsets
@@ -300,8 +312,8 @@ class ValidatorNode:
         logger.info(f"ValidatorNode created: {self.config.name}")
 
     def get_p2p_address(self) -> str:
-        """Retorna endereço P2P (multiaddr format)"""
-        return f"/ip4/{self.config.ip}/udp/{self.config.p2p_port}"
+        """Retorna endereço P2P (multiaddr format com QUIC, alinhado à IOTA v1.33.1)"""
+        return f"/ip4/{self.config.ip}/udp/{self.config.p2p_port}/quic"
 
     def get_rpc_endpoint(self) -> Optional[str]:
         """Retorna endpoint RPC (validadores normalmente não expõem)"""
@@ -343,8 +355,8 @@ class FullnodeNode:
         logger.info(f"FullnodeNode created: {self.config.name} (gateway)")
 
     def get_p2p_address(self) -> str:
-        """Retorna endereço P2P (multiaddr format)"""
-        return f"/ip4/{self.config.ip}/udp/{self.config.p2p_port}"
+        """Retorna endereço P2P (multiaddr format com QUIC, alinhado à IOTA v1.33.1)"""
+        return f"/ip4/{self.config.ip}/udp/{self.config.p2p_port}/quic"
 
     def get_rpc_endpoint(self) -> str:
         """Retorna endpoint RPC"""

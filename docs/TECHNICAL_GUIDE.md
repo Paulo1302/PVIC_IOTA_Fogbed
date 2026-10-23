@@ -252,7 +252,7 @@ Step 1: Generate initial genesis
 Step 2: Patch with real IPs
   - network.yaml updated with actual IPs
   - Each validator: 10.0.0.X
-  - P2P ports: 2001, 2011, 2021, 2031
+  - P2P primary port: 8084 (QUIC multiaddr /ip4/10.0.0.X/udp/8084/quic)
 
 Step 3: Regenerate genesis.blob
   - Commits real topology to consensus
